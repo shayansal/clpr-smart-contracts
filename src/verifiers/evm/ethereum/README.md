@@ -50,6 +50,8 @@ flowchart TD
 
 The **shared** part is the bottom half: MPT account + storage proofs ([ClprEvmStateProof](../../libraries/proof/evm/ClprEvmStateProof.sol)) and the protobuf bundle-content decode. Only "how do we trust this state root?" differs.
 
+The light-client half itself (header, BLS, SSZ execution branch, rotation, anchor encoding) lives in [EthBeaconLightClient](../../../libraries/proof/beacon/EthBeaconLightClient.sol). The OP Stack verifiers reuse it through the deployed [EthL1StateVerifier](./EthL1StateVerifier.sol) wrapper (see [../opstack/README.md](../opstack/README.md)).
+
 ---
 
 ## 3. Configuration & trust anchor
