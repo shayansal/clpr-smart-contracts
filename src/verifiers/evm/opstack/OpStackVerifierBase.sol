@@ -81,6 +81,8 @@ abstract contract OpStackVerifierBase is ClprEvmBundleVerifier {
     uint64 public immutable L1_SECONDS_PER_SLOT;
 
     // Profile (see {OpStackOutputRootProof.Profile}); immutables, rebuilt in memory per call.
+    OpStackOutputRootProof.RootFormat public immutable ROOT_FORMAT;
+    uint256 public immutable L2_CHAIN_ID;
     address public immutable ANCHOR_STATE_REGISTRY;
     bytes32 public immutable ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH;
     uint256 public immutable DISPUTE_GAME_FINALITY_DELAY_SECONDS;
@@ -97,6 +99,7 @@ abstract contract OpStackVerifierBase is ClprEvmBundleVerifier {
     uint256 internal immutable GAME_CREATED_AT_OFFSET;
     uint256 internal immutable GAME_RESOLVED_AT_OFFSET;
     uint256 internal immutable GAME_STATUS_OFFSET;
+    uint256 internal immutable GAME_WAS_RESPECTED_SLOT;
     uint256 internal immutable GAME_WAS_RESPECTED_OFFSET;
 
     error InvalidPayloadShape();
@@ -109,21 +112,25 @@ abstract contract OpStackVerifierBase is ClprEvmBundleVerifier {
         IEthL1StateVerifier l1StateVerifier,
         uint64 l1GenesisTime,
         uint64 l1SecondsPerSlot,
-        OpStackOutputRootProof.Profile memory profile
+        OpStackOutputRootProof.Profile memory profile_
     ) {
         if (
-            address(l1StateVerifier) == address(0) || l1SecondsPerSlot == 0 || profile.anchorStateRegistry == address(0)
-                || profile.anchorStateRegistryImplCodeHash == bytes32(0) || profile.gameImplementation == address(0)
+            address(l1StateVerifier) == address(0) || l1SecondsPerSlot == 0
+                || profile_.anchorStateRegistry == address(0) || profile_.anchorStateRegistryImplCodeHash == bytes32(0)
+                || profile_.gameImplementation == address(0)
+                || (profile_.rootFormat == OpStackOutputRootProof.RootFormat.SUPER_ROOT_V1 && profile_.l2ChainId == 0)
         ) revert InvalidDeployment();
         FINALITY = finality;
         L1_STATE_VERIFIER = l1StateVerifier;
         L1_GENESIS_TIME = l1GenesisTime;
         L1_SECONDS_PER_SLOT = l1SecondsPerSlot;
-        ANCHOR_STATE_REGISTRY = profile.anchorStateRegistry;
-        ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH = profile.anchorStateRegistryImplCodeHash;
-        DISPUTE_GAME_FINALITY_DELAY_SECONDS = profile.disputeGameFinalityDelaySeconds;
-        GAME_IMPLEMENTATION = profile.gameImplementation;
-        OpStackOutputRootProof.Layout memory l = profile.layout;
+        ROOT_FORMAT = profile_.rootFormat;
+        L2_CHAIN_ID = profile_.l2ChainId;
+        ANCHOR_STATE_REGISTRY = profile_.anchorStateRegistry;
+        ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH = profile_.anchorStateRegistryImplCodeHash;
+        DISPUTE_GAME_FINALITY_DELAY_SECONDS = profile_.disputeGameFinalityDelaySeconds;
+        GAME_IMPLEMENTATION = profile_.gameImplementation;
+        OpStackOutputRootProof.Layout memory l = profile_.layout;
         ASR_DISPUTE_GAME_FACTORY_SLOT = l.asrDisputeGameFactorySlot;
         ASR_ANCHOR_GAME_SLOT = l.asrAnchorGameSlot;
         ASR_STARTING_ANCHOR_ROOT_SLOT = l.asrStartingAnchorRootSlot;
@@ -136,11 +143,14 @@ abstract contract OpStackVerifierBase is ClprEvmBundleVerifier {
         GAME_CREATED_AT_OFFSET = l.gameCreatedAtOffset;
         GAME_RESOLVED_AT_OFFSET = l.gameResolvedAtOffset;
         GAME_STATUS_OFFSET = l.gameStatusOffset;
+        GAME_WAS_RESPECTED_SLOT = l.gameWasRespectedSlot;
         GAME_WAS_RESPECTED_OFFSET = l.gameWasRespectedOffset;
     }
 
     /// @notice The deployment's profile (addresses, pinned code, finality delay, storage layout).
     function profile() public view returns (OpStackOutputRootProof.Profile memory p) {
+        p.rootFormat = ROOT_FORMAT;
+        p.l2ChainId = L2_CHAIN_ID;
         p.anchorStateRegistry = ANCHOR_STATE_REGISTRY;
         p.anchorStateRegistryImplCodeHash = ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH;
         p.disputeGameFinalityDelaySeconds = DISPUTE_GAME_FINALITY_DELAY_SECONDS;
@@ -158,6 +168,7 @@ abstract contract OpStackVerifierBase is ClprEvmBundleVerifier {
             gameCreatedAtOffset: GAME_CREATED_AT_OFFSET,
             gameResolvedAtOffset: GAME_RESOLVED_AT_OFFSET,
             gameStatusOffset: GAME_STATUS_OFFSET,
+            gameWasRespectedSlot: GAME_WAS_RESPECTED_SLOT,
             gameWasRespectedOffset: GAME_WAS_RESPECTED_OFFSET
         });
     }

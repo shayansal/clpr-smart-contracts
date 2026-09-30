@@ -20,7 +20,10 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 ///                       game not to have been lost by its proposer (`status != CHALLENGER_WINS`).
 ///
 ///         The output root preimage (version 0 ‖ stateRoot ‖ messagePasserStorageRoot ‖ blockHash) is
-///         checked by {outputRoot}, which the caller hashes and then uses the stateRoot of.
+///         checked by {outputRoot}, which the caller hashes and then uses the stateRoot of. On chains
+///         whose games claim interop SUPER roots (`RootFormat.SUPER_ROOT_V1`, e.g. OP Mainnet's
+///         SuperFaultDisputeGame), the dispute proof also carries the super-root preimage, and the
+///         output root must be its entry for the profile's `l2ChainId`.
 ///
 /// @dev Every storage slot and packed-field offset comes from a {Layout} value (data), so that a
 ///      contracts upgrade that moves a field is a new profile, not new code (clpr-spec ADR 2026-10-01
@@ -30,7 +33,7 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 ///      delegate to the pinned game implementation (which pins the game's own ASR/DGF immutables).
 library OpStackOutputRootProof {
     // ── Dispute proof RLP layout ─────────────────────────────────────────────
-    uint256 internal constant DISPUTE_FIELDS = 11;
+    uint256 internal constant DISPUTE_FIELDS = 12;
     uint256 internal constant DP_IDX_MODE = 0;
     uint256 internal constant DP_IDX_GAME_TYPE = 1;
     uint256 internal constant DP_IDX_EXTRA_DATA = 2;
@@ -42,6 +45,7 @@ library OpStackOutputRootProof {
     uint256 internal constant DP_IDX_GAME_ACCOUNT = 8;
     uint256 internal constant DP_IDX_GAME_CODE = 9;
     uint256 internal constant DP_IDX_GAME_STORAGE = 10;
+    uint256 internal constant DP_IDX_SUPER_ROOT_PREIMAGE = 11;
 
     uint256 internal constant MODE_ANCHOR = 0;
     uint256 internal constant MODE_GAME = 1;
@@ -57,6 +61,11 @@ library OpStackOutputRootProof {
 
     /// @dev Output root preimage: `version(32) ‖ stateRoot(32) ‖ messagePasserStorageRoot(32) ‖ blockHash(32)`.
     uint256 internal constant OUTPUT_ROOT_PREIMAGE_LENGTH = 128;
+
+    /// @dev Super root (interop) preimage, version 1: `0x01 ‖ timestamp(8) ‖ (chainId(32) ‖ outputRoot(32))*`.
+    uint8 internal constant SUPER_ROOT_VERSION = 1;
+    uint256 internal constant SUPER_ROOT_HEADER_LENGTH = 9;
+    uint256 internal constant SUPER_ROOT_ENTRY_LENGTH = 64;
 
     // ── DisputeGameFactory clone format (Solady LibClone CWIA, DGF ≥ 1.0) ────
     // runtime = PREFIX(54) ‖ uint16(argsLength) ‖ MID(9) ‖ implementation(20) ‖ SUFFIX(13) ‖ args
@@ -83,11 +92,23 @@ library OpStackOutputRootProof {
         uint256 gameCreatedAtOffset; // uint64
         uint256 gameResolvedAtOffset; // uint64
         uint256 gameStatusOffset; // uint8
+        uint256 gameWasRespectedSlot; // game slot holding wasRespectedGameTypeWhenCreated
         uint256 gameWasRespectedOffset; // bool
+    }
+
+    /// @notice What a dispute game's root claim commits to.
+    enum RootFormat {
+        /// The chain's own L2 output root (FaultDisputeGame, Base AggregateVerifier, …).
+        OUTPUT_ROOT,
+        /// An interop super root over the dependency set's output roots (SuperFaultDisputeGame, …);
+        /// the chain's output root is the entry for `l2ChainId`.
+        SUPER_ROOT_V1
     }
 
     /// @notice The chain being verified: its L1 contracts, the pinned code, and the storage layout.
     struct Profile {
+        RootFormat rootFormat;
+        uint256 l2ChainId;
         address anchorStateRegistry;
         bytes32 anchorStateRegistryImplCodeHash;
         uint256 disputeGameFinalityDelaySeconds;
@@ -105,6 +126,8 @@ library OpStackOutputRootProof {
 
     error InvalidDisputeProof();
     error InvalidOutputRootPreimage();
+    error InvalidSuperRootPreimage();
+    error OutputRootNotInSuperRoot(uint256 l2ChainId, bytes32 outputRoot);
     error UnsupportedOutputRootVersion(bytes32 version);
     error UnknownProofMode(uint256 mode);
     error AnchorStateRegistryImplMismatch(address implementation, bytes32 codeHash);
@@ -141,11 +164,11 @@ library OpStackOutputRootProof {
     //   Dispute proof
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @notice Prove that `root` is accepted by the chain's L1 fault-proof contracts in the L1 state
-    ///         `l1StateRoot` (whose wall-clock time is `l1Time`).
+    /// @notice Prove that the chain's output root `outputRoot_` is accepted by its L1 fault-proof
+    ///         contracts in the L1 state `l1StateRoot` (whose wall-clock time is `l1Time`).
     /// @param disputeProofItem RLP `[mode, gameType, extraData, asrAccountProof, asrStorageProof,
     ///        asrImplAccountProof, dgfAccountProof, dgfStorageProof, gameAccountProof, gameCode,
-    ///        gameStorageProof]` — items unused by a mode are empty lists / strings.
+    ///        gameStorageProof, superRootPreimage]` — items unused by a mode/format are empty.
     /// @param acceptProposed PROPOSED tier: accept a registered game that has not (yet) been lost by its
     ///        proposer, without waiting for resolution or the finality delay. Trusts the proposer.
     function verify(
@@ -153,11 +176,12 @@ library OpStackOutputRootProof {
         Memory.Slice disputeProofItem,
         bytes32 l1StateRoot,
         uint64 l1Time,
-        bytes32 root,
+        bytes32 outputRoot_,
         bool acceptProposed
     ) internal pure {
         Memory.Slice[] memory dp = RLP.readList(disputeProofItem);
         if (dp.length != DISPUTE_FIELDS) revert InvalidDisputeProof();
+        bytes32 root = _claimedRoot(p, RLP.readBytes(dp[DP_IDX_SUPER_ROOT_PREIMAGE]), outputRoot_);
 
         Registry memory reg = _readRegistry(p, dp, l1StateRoot);
         uint256 mode = RLP.readUint256(dp[DP_IDX_MODE]);
@@ -249,7 +273,10 @@ library OpStackOutputRootProof {
         uint64 resolvedAt = uint64(_field(state, p.layout.gameResolvedAtOffset));
         // forge-lint: disable-next-line(unsafe-typecast)
         uint8 status = uint8(_field(state, p.layout.gameStatusOffset));
-        bool wasRespected = uint8(_field(state, p.layout.gameWasRespectedOffset)) != 0;
+        bytes32 respectedWord = p.layout.gameWasRespectedSlot == p.layout.gameStateSlot
+            ? state
+            : _slot(dp[DP_IDX_GAME_STORAGE], gameStorageRoot, p.layout.gameWasRespectedSlot);
+        bool wasRespected = uint8(_field(respectedWord, p.layout.gameWasRespectedOffset)) != 0;
 
         // ASR.isGameProper (registered ✓, not blacklisted ✓, not retired) + isGameRespected.
         if (createdAt <= reg.retirementTimestamp) revert GameRetired(game, createdAt, reg.retirementTimestamp);
@@ -318,6 +345,42 @@ library OpStackOutputRootProof {
             actual := keccak256(add(code, 0x20), CLONE_HEADER_LENGTH)
         }
         if (actual != expected) revert GameImplementationMismatch(game);
+    }
+
+    /// @dev The root the dispute games claim: the output root itself, or the super root whose entry for
+    ///      `l2ChainId` is the output root.
+    function _claimedRoot(Profile memory p, bytes memory superPreimage, bytes32 outputRoot_)
+        private
+        pure
+        returns (bytes32)
+    {
+        if (p.rootFormat == RootFormat.OUTPUT_ROOT) {
+            if (superPreimage.length != 0) revert InvalidSuperRootPreimage();
+            return outputRoot_;
+        }
+        uint256 len = superPreimage.length;
+        if (
+            len < SUPER_ROOT_HEADER_LENGTH + SUPER_ROOT_ENTRY_LENGTH
+                || (len - SUPER_ROOT_HEADER_LENGTH) % SUPER_ROOT_ENTRY_LENGTH != 0
+                || uint8(superPreimage[0]) != SUPER_ROOT_VERSION
+        ) revert InvalidSuperRootPreimage();
+        bool found;
+        for (uint256 off = SUPER_ROOT_HEADER_LENGTH; off < len; off += SUPER_ROOT_ENTRY_LENGTH) {
+            uint256 chainId;
+            bytes32 entryRoot;
+            assembly ("memory-safe") {
+                let at := add(add(superPreimage, 0x20), off)
+                chainId := mload(at)
+                entryRoot := mload(add(at, 0x20))
+            }
+            if (chainId == p.l2ChainId) {
+                if (entryRoot != outputRoot_) break;
+                found = true;
+                break;
+            }
+        }
+        if (!found) revert OutputRootNotInSuperRoot(p.l2ChainId, outputRoot_);
+        return keccak256(superPreimage);
     }
 
     // ── MPT helpers ──────────────────────────────────────────────────────────
