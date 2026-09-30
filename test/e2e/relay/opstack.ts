@@ -23,6 +23,7 @@ export interface OpStackLayout {
     gameCreatedAtOffset: bigint;
     gameResolvedAtOffset: bigint;
     gameStatusOffset: bigint;
+    gameWasRespectedSlot: bigint;
     gameWasRespectedOffset: bigint;
 }
 
@@ -41,10 +42,24 @@ export const BASE_SEPOLIA_LAYOUT: OpStackLayout = {
     gameCreatedAtOffset: 0n,
     gameResolvedAtOffset: 8n,
     gameStatusOffset: 16n,
+    gameWasRespectedSlot: 0n,
     gameWasRespectedOffset: 18n
 };
 
+/// ASR 3.9.0 / DGF 1.6.1 / SuperFaultDisputeGame (OP Mainnet, game type 9, super roots): same ASR/DGF
+/// slots; the game keeps `wasRespectedGameTypeWhenCreated` in its own slot 9.
+export const SUPER_FAULT_DISPUTE_GAME_LAYOUT: OpStackLayout = {
+    ...BASE_SEPOLIA_LAYOUT,
+    gameWasRespectedSlot: 9n,
+    gameWasRespectedOffset: 0n
+};
+
+/// `OpStackOutputRootProof.RootFormat`.
+export const ROOT_FORMAT = {OUTPUT_ROOT: 0, SUPER_ROOT_V1: 1} as const;
+
 export interface OpStackProfile {
+    rootFormat: number;
+    l2ChainId: bigint;
     anchorStateRegistry: Hex;
     anchorStateRegistryImplCodeHash: Hex;
     disputeGameFinalityDelaySeconds: bigint;
@@ -117,6 +132,16 @@ export function outputRootPreimage(stateRoot: Hex, messagePasserStorageRoot: Hex
     return {preimage, outputRoot: keccak256(preimage)};
 }
 
+/// Interop super root (version 1): `0x01 ‖ timestamp(8) ‖ (chainId(32) ‖ outputRoot(32))*`.
+export function superRootPreimage(timestamp: bigint, entries: {chainId: bigint; outputRoot: Hex}[]): {
+    preimage: Hex;
+    superRoot: Hex;
+} {
+    const preimage = ("0x01" + timestamp.toString(16).padStart(16, "0") + entries.map((e) =>
+        e.chainId.toString(16).padStart(64, "0") + e.outputRoot.slice(2)).join("")) as Hex;
+    return {preimage, superRoot: keccak256(preimage)};
+}
+
 /// `[[slot32, proofNodes], …]` for the requested keys, from an `eth_getProof` result.
 export function storageEntries(proof: EthGetProofResult, keys: Hex[]): unknown[] {
     const byKey = new Map(proof.storageProof.map((sp) => [BigInt(sp.key), sp]));
@@ -145,6 +170,8 @@ export interface DisputeProofParts {
     gameAccountProof: Buffer[];
     gameCode: Hex;
     gameStorageProof: unknown[];
+    /// Super-root chains only; "0x" otherwise.
+    superRootPreimage?: Hex;
 }
 
 /// The dispute-proof RLP item (`OpStackOutputRootProof` DP_IDX_* order).
@@ -160,7 +187,8 @@ export function disputeProofItem(p: DisputeProofParts): unknown[] {
         p.dgfStorageProof,
         p.gameAccountProof,
         hexToBuf(p.gameCode),
-        p.gameStorageProof
+        p.gameStorageProof,
+        hexToBuf(p.superRootPreimage ?? "0x")
     ];
 }
 
@@ -197,6 +225,8 @@ export function encodeOpStackL2StateRootProof(p: Omit<OpStackBundleParts, "l2Acc
 /// ABI tuple for the verifier constructors' `Profile` argument.
 export function profileTuple(p: OpStackProfile) {
     return {
+        rootFormat: p.rootFormat,
+        l2ChainId: p.l2ChainId,
         anchorStateRegistry: p.anchorStateRegistry,
         anchorStateRegistryImplCodeHash: p.anchorStateRegistryImplCodeHash,
         disputeGameFinalityDelaySeconds: p.disputeGameFinalityDelaySeconds,
