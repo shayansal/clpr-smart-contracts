@@ -20,6 +20,8 @@ import {
     packGameId,
     slotHex,
     storageEntries,
+    SUPER_FAULT_DISPUTE_GAME_LAYOUT,
+    superRootPreimage,
     type DisputeProofParts
 } from "./opstack.js";
 
@@ -63,6 +65,11 @@ const SERVICE: Hex = "0x5e7c1ce1acce5e7c1ce1acce5e7c1ce1acce5e7c";
 const SERVICE_CODE: Hex = "0x60806040526004361061001e5760003560e01c80";
 const CHANNEL_ID: Hex = keccak256(toHex("clpr/opstack/synthetic"));
 const MESSAGE_PASSER: Hex = "0x4200000000000000000000000000000000000016";
+/// Super-root scenario: our chain and one other chain in the dependency set.
+const L2_CHAIN_ID = 8453n;
+const OTHER_CHAIN_ID = 10n;
+const SUPER_GAME: Hex = "0x6a3e000000000000000000000000000000002000";
+const SL = SUPER_FAULT_DISPUTE_GAME_LAYOUT;
 
 interface GameSpec {
     name: string;
@@ -183,6 +190,24 @@ export async function buildOpStackSyntheticFixture(ports = {l2: 8611, l1: 8612})
             await setStorage(l1.url, DGF, dgfGameSlot(gameUuid(g.gameType, outputRoot, g.extraData), L),
                 packGameId(g.gameType, g.createdAt, g.address));
         }
+        // Super-root game (SuperFaultDisputeGame layout: wasRespected in slot 9), claiming a super root
+        // over [other chain, our chain].
+        const otherRoot = keccak256(toHex("other chain output root"));
+        const superTs = 1_999_000_000n;
+        const sup = superRootPreimage(superTs, [
+            {chainId: OTHER_CHAIN_ID, outputRoot: otherRoot}, {chainId: L2_CHAIN_ID, outputRoot}
+        ]);
+        const supWithoutUs = superRootPreimage(superTs, [{chainId: OTHER_CHAIN_ID, outputRoot: otherRoot}]);
+        const superExtra = encodePacked(["uint256"], [superTs]);
+        const superCreated = L1_TIME - 20n * DAY;
+        await setCode(l1.url, SUPER_GAME, cloneCode(GAME_IMPL, (encodePacked(["address", "bytes32", "bytes32", "bytes"],
+            [PROPOSER, sup.superRoot, slotHex(0n), superExtra]) + "0000") as Hex));
+        await setStorage(l1.url, SUPER_GAME, slotHex(SL.gameStateSlot),
+            slotHex(superCreated | ((L1_TIME - 10n * DAY) << 64n) | (BigInt(GAME_STATUS.DEFENDER_WINS) << 128n) | (1n << 136n)));
+        await setStorage(l1.url, SUPER_GAME, slotHex(SL.gameWasRespectedSlot), slotHex(1n));
+        await setStorage(l1.url, DGF, dgfGameSlot(gameUuid(RESPECTED_TYPE, sup.superRoot, superExtra), L),
+            packGameId(RESPECTED_TYPE, superCreated, SUPER_GAME));
+
         const finalized = games.find((g) => g.name === "finalized")!;
         for (const asr of [ASR, ASR_STARTING_ONLY]) {
             await setStorage(l1.url, asr, slotHex(L.asrDisputeGameFactorySlot), slotHex(BigInt(DGF)));
@@ -203,7 +228,7 @@ export async function buildOpStackSyntheticFixture(ports = {l2: 8611, l1: 8612})
         const l1Block = await rpc<{stateRoot: Hex; number: Hex}>(l1.url, "eth_getBlockByNumber", ["latest", false]);
         const at = l1Block.number;
 
-        const asrKeys = asrSlots(L, games.map((g) => g.address));
+        const asrKeys = asrSlots(L, [...games.map((g) => g.address), SUPER_GAME]);
         const asrProof = await rpc<EthGetProofResult>(l1.url, "eth_getProof", [ASR, asrKeys, at]);
         const asr2Proof = await rpc<EthGetProofResult>(l1.url, "eth_getProof", [ASR_STARTING_ONLY, asrKeys, at]);
         const implProof = await rpc<EthGetProofResult>(l1.url, "eth_getProof", [ASR_IMPL, [], at]);
@@ -213,7 +238,8 @@ export async function buildOpStackSyntheticFixture(ports = {l2: 8611, l1: 8612})
         const dgfKeys = [
             ...games.map((g) => uuidOf(g.gameType, outputRoot, g.extraData)),
             uuidOf(RESPECTED_TYPE, tampered.outputRoot, finalized.extraData),
-            uuidOf(RESPECTED_TYPE, outputRoot, wrongType.extraData)
+            uuidOf(RESPECTED_TYPE, outputRoot, wrongType.extraData),
+            uuidOf(RESPECTED_TYPE, sup.superRoot, superExtra)
         ];
         const dgfProof = await rpc<EthGetProofResult>(l1.url, "eth_getProof", [DGF, dgfKeys, at]);
         const dgfEntries = storageEntries(dgfProof, dgfKeys);
@@ -260,6 +286,30 @@ export async function buildOpStackSyntheticFixture(ports = {l2: 8611, l1: 8612})
                     disputeProof: hexOf(disputeProofItem({...gameParts, gameType: RESPECTED_TYPE}))});
             }
         }
+        // Super-root cases (verified by a SUPER_ROOT_V1 verifier with l2ChainId = L2_CHAIN_ID).
+        const sgp = await rpc<EthGetProofResult>(l1.url, "eth_getProof",
+            [SUPER_GAME, [slotHex(SL.gameStateSlot), slotHex(SL.gameWasRespectedSlot)], at]);
+        const superParts: DisputeProofParts = {
+            ...base(asrProof),
+            mode: MODE.GAME,
+            gameType: RESPECTED_TYPE,
+            extraData: superExtra,
+            gameAccountProof: accountNodes(sgp),
+            gameCode: await rpc<Hex>(l1.url, "eth_getCode", [SUPER_GAME, at]),
+            gameStorageProof: storageEntries(sgp, [slotHex(SL.gameStateSlot), slotHex(SL.gameWasRespectedSlot)]),
+            superRootPreimage: sup.preimage
+        };
+        cases.push({name: "super:finalized", preimage, disputeProof: hexOf(disputeProofItem(superParts))});
+        cases.push({name: "super:withoutOurChain", preimage,
+            disputeProof: hexOf(disputeProofItem({...superParts, superRootPreimage: supWithoutUs.preimage}))});
+        cases.push({name: "super:badVersion", preimage,
+            disputeProof: hexOf(disputeProofItem({...superParts, superRootPreimage: ("0x02" + sup.preimage.slice(4)) as Hex}))});
+        cases.push({name: "super:missing", preimage,
+            disputeProof: hexOf(disputeProofItem({...superParts, superRootPreimage: "0x"}))});
+        // Our entry present but with another output root (a different L2 block).
+        cases.push({name: "super:tamperedPreimage", preimage: tampered.preimage,
+            disputeProof: hexOf(disputeProofItem(superParts))});
+
         const anchorParts: DisputeProofParts = {
             ...base(asrProof), mode: MODE.ANCHOR, gameType: RESPECTED_TYPE, extraData: finalized.extraData
         };
@@ -286,7 +336,9 @@ export async function buildOpStackSyntheticFixture(ports = {l2: 8611, l1: 8612})
                 gameImplementation: GAME_IMPL,
                 finalityDelaySeconds: FINALITY_DELAY.toString(),
                 respectedGameType: RESPECTED_TYPE,
-                games: Object.fromEntries(games.map((g) => [g.name, g.address]))
+                games: Object.fromEntries(games.map((g) => [g.name, g.address])),
+                superGame: SUPER_GAME,
+                l2ChainId: L2_CHAIN_ID.toString()
             },
             l2: {
                 stateRoot: l2Block.stateRoot,
