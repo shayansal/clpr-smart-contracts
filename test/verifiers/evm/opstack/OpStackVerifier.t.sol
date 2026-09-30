@@ -117,12 +117,15 @@ abstract contract OpStackFixture is EthCommitteeFixtures {
             gameCreatedAtOffset: 0,
             gameResolvedAtOffset: 8,
             gameStatusOffset: 16,
+            gameWasRespectedSlot: 0,
             gameWasRespectedOffset: 18
         });
     }
 
     function _profile(address registry, uint256 delay) internal view returns (OP.Profile memory) {
         return OP.Profile({
+            rootFormat: OP.RootFormat.OUTPUT_ROOT,
+            l2ChainId: 84532,
             anchorStateRegistry: registry,
             anchorStateRegistryImplCodeHash: asrImplCodeHash,
             disputeGameFinalityDelaySeconds: delay,
@@ -395,6 +398,47 @@ contract OpStackVerifierTest is OpStackFixture {
         assertEq(p.disputeGameFinalityDelaySeconds, finalityDelay);
         assertEq(p.gameImplementation, gameImpl);
         assertEq(abi.encode(p.layout), abi.encode(_layout()));
+    }
+
+    // ── SUPER roots (OP Mainnet-style SuperFaultDisputeGame) ────────────────
+
+    function _superVerifier() internal returns (OpStackVerifier) {
+        OP.Profile memory p = _profile(asr, finalityDelay);
+        p.rootFormat = OP.RootFormat.SUPER_ROOT_V1;
+        p.l2ChainId = vm.parseJsonUint(json, ".l1.l2ChainId");
+        p.layout.gameWasRespectedSlot = 9; // SuperFaultDisputeGame keeps it in its own slot
+        p.layout.gameWasRespectedOffset = 0;
+        return new OpStackVerifier(l1, 0, 12, p);
+    }
+
+    function test_super_acceptsOutputRootThroughSuperRoot() public {
+        _assertExpectedMetadata(_verify(_superVerifier(), "super:finalized"));
+    }
+
+    function test_super_rejectsSuperRootWithoutOurChain() public {
+        _expectReject(_superVerifier(), "super:withoutOurChain", OP.OutputRootNotInSuperRoot.selector);
+    }
+
+    function test_super_rejectsOtherOutputRootForOurChain() public {
+        _expectReject(_superVerifier(), "super:tamperedPreimage", OP.OutputRootNotInSuperRoot.selector);
+    }
+
+    function test_super_rejectsBadOrMissingPreimage() public {
+        OpStackVerifier v = _superVerifier();
+        _expectReject(v, "super:badVersion", OP.InvalidSuperRootPreimage.selector);
+        _expectReject(v, "super:missing", OP.InvalidSuperRootPreimage.selector);
+    }
+
+    function test_outputRootVerifier_rejectsSuperRootPreimage() public {
+        _expectReject(finalized, "super:finalized", OP.InvalidSuperRootPreimage.selector);
+    }
+
+    function test_constructor_superRootNeedsChainId() public {
+        OP.Profile memory p = _profile(asr, finalityDelay);
+        p.rootFormat = OP.RootFormat.SUPER_ROOT_V1;
+        p.l2ChainId = 0;
+        vm.expectRevert(OpStackVerifierBase.InvalidDeployment.selector);
+        new OpStackVerifier(l1, 0, 12, p);
     }
 
     // ── PROPOSED ─────────────────────────────────────────────────────────────
