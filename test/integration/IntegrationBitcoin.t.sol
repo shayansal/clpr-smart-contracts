@@ -114,6 +114,12 @@ contract IntegrationBitcoinTest is IntegrationTestBase, BitcoinTestBuilder {
         assertEq(c.nextMessageId, 4, "3 undeliverable replies queued");
         assertEq(c.ackedMessageId, 0);
 
+        // Outbound DATA toward Bitcoin is refused: the verifier's placeholder peer throttles
+        // (maxSyncBytes = 1) make every sendMessage fail the peer-size check.
+        vm.prank(address(app));
+        vm.expectRevert(ClprTypes.ClprPayloadTooLarge.selector);
+        service.sendMessage(channelId, connectorAddr, abi.encodePacked(address(app)), hex"01");
+
         // Replaying the same bundle fails (the anchor's cursor moved on).
         vm.expectRevert(BitcoinVerifier.NotACursorSpend.selector);
         service.submitBundle(channelId, proof);
