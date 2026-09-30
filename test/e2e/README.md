@@ -279,6 +279,8 @@ hinTS signature (3 432 B; `TSSVerifier` rejects the 2 920 B genesis-Schnorr form
 
 The recorded WRAPS-signed fixture in `test/verifiers/hiero/fixtures/` (from a localnet with the
 native CLPR service) is what `HieroVerifier` is currently tested against (`forge test --match-contract HieroVerifierTest`).
+What the live Solo network can already prove on anvil (Solo's hinTS aggregate signature over a
+block-item root) is covered by `npm run test:e2e:anvil:solo` (see the mixed-backends section above).
 
 ## What's deployed per chain
 
