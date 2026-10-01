@@ -31,6 +31,8 @@ Every arrow is checked on-chain. If one link fails, the call reverts.
 
 The L1 half lives in its own contract so that both verifiers stay under EIP-170 (§9).
 
+Steps 1, 3 and 4 live in [OpStackBundleVerifierBase](./OpStackBundleVerifierBase.sol). Step 2 is the only per-family part: dispute games here, and an output-oracle array for Blast, Mantle and Katana in [oracle/](./oracle/README.md).
+
 ---
 
 ## 2. Tiers and trust
@@ -156,9 +158,10 @@ Coverage depends on the settlement contracts, not on the brand. A chain is cover
 | **World Chain** | PermissionedDisputeGame (1) | ✅ (weaker) | `OUTPUT_ROOT`, chain id 480. Proposer and challenger are **permissioned**, so FINALIZED also trusts them. |
 | **Soneium** | SuperPermissionedDisputeGame (5) | ✅ (weaker) | `SUPER_ROOT_V1`, chain id 1868. Permissioned. |
 | **Celo** | OPSuccinctFaultDisputeGame, OP Succinct Lite (42) | ✅ | `OUTPUT_ROOT`, chain id 42220. Trust includes the SP1 verifier. |
-| **Blast** | `L2OutputOracle` (portal 1.10.0, no ASR) | ❌ | Needs an L2OutputOracle profile (Class C) |
-| **Mantle** | Portal 1.7.0 without an ASR (OP Succinct via an output oracle) | ❌ | Class C |
-| **X Layer**, **Katana** | Settle through the Polygon AggLayer (not probed here) | ❌ | Not an OP-Stack ASR/DGF settlement. Needs its own verifier. |
+| **Blast** | `L2OutputOracle` 1.6.0 (portal 1.10.0, no ASR) | ✅ by the output-oracle verifier | See [oracle/README.md](./oracle/README.md). Live-verified on mainnet; 7-field L2 accounts. |
+| **Mantle** | `OPSuccinctL2OutputOracle` 2.0.1 (portal 1.7.0, no ASR) | ✅ by the output-oracle verifier | See [oracle/README.md](./oracle/README.md). Live-verified on mainnet. |
+| **Katana** | Polygon AggLayer, `AggchainFEP` 3.0.0 | ✅ by the output-oracle verifier | See [oracle/README.md](./oracle/README.md). Live-verified on mainnet. |
+| **X Layer** | Polygon AggLayer, `AggchainECDSAMultisig` (1-of-1 signer) | ❌ | No L2 state commitment reaches L1. See [oracle/README.md §9](./oracle/README.md#9-x-layer-chain-196-no-verifiable-path-from-l1-storage-to-its-l2-state-root). |
 
 Only Base Sepolia was exercised end to end in this work. For every other ✅ row, confirm the profile against the chain at deploy time with the same probe (`respectedGameType`, `gameImpls`, and Sourcify layouts). The live builder checks it off-chain against the chain.
 
