@@ -130,6 +130,7 @@ abstract contract OpStackFixture is EthCommitteeFixtures {
             anchorStateRegistryImplCodeHash: asrImplCodeHash,
             disputeGameFinalityDelaySeconds: delay,
             gameImplementation: gameImpl,
+            gameArgsHash: bytes32(0),
             layout: _layout()
         });
     }

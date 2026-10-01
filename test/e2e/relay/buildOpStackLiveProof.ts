@@ -30,7 +30,8 @@ import {
     storageEntries,
     type DisputeProofParts,
     type OpStackLayout,
-    type OpStackProfile
+    type OpStackProfile,
+    ZERO_HASH
 } from "./opstack.js";
 import {stageLatestL2Proof} from "./stageLatestL2Proof.js";
 
@@ -155,6 +156,7 @@ const ABI = [
     {type: "function", name: "gameAtIndex", inputs: [{type: "uint256"}],
         outputs: [{type: "uint32"}, {type: "uint64"}, {type: "address"}], stateMutability: "view"},
     {type: "function", name: "gameImpls", inputs: [{type: "uint32"}], outputs: [{type: "address"}], stateMutability: "view"},
+    {type: "function", name: "gameArgs", inputs: [{type: "uint32"}], outputs: [{type: "bytes"}], stateMutability: "view"},
     {type: "function", name: "disputeGameFinalityDelaySeconds", inputs: [], outputs: [{type: "uint256"}], stateMutability: "view"},
     {type: "function", name: "anchorStateRegistry", inputs: [], outputs: [{type: "address"}], stateMutability: "view"},
     {type: "function", name: "gameType", inputs: [], outputs: [{type: "uint32"}], stateMutability: "view"},
@@ -218,6 +220,8 @@ export interface OpStackLiveCapture {
         disputeGameFactory: Hex;
         respectedGameType: number;
         gameImplementation: Hex;
+        /// `DisputeGameFactory.gameArgs(respectedGameType)` (DGF >= 1.6); "0x" when empty or absent.
+        gameArgs?: Hex;
         asrProof: EthGetProofResult;
         asrImplProof: EthGetProofResult;
         dgfProof: EthGetProofResult;
@@ -335,6 +339,8 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
             l1Rpc, "eth_getBlockByNumber", [B, false]);
         const delay = await call<bigint>(l1Rpc, asr, "disputeGameFinalityDelaySeconds", [], B);
         const gameImplementation = await call<Hex>(l1Rpc, dgf, "gameImpls", [respectedGameType], B);
+        // DGF < 1.6 has no gameArgs(): its clones carry no implementation args.
+        const gameArgs = await call<Hex>(l1Rpc, dgf, "gameArgs", [respectedGameType], B).catch(() => "0x" as Hex);
         return {
             anchor, newest, resolved, pend,
             l1: {
@@ -345,6 +351,7 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
                 disputeGameFactory: dgf,
                 respectedGameType,
                 gameImplementation,
+                gameArgs,
                 asrProof, asrImplProof, dgfProof
             }
         };
@@ -431,6 +438,30 @@ function unpackGameState(L: OpStackLayout, proof: EthGetProofResult) {
 
 const statusOf = (L: OpStackLayout, proof: EthGetProofResult) => unpackGameState(L, proof).status;
 
+/// `OpStackOutputRootProof.Profile.gameArgsHash`: zero when the factory clones without game args.
+export function gameArgsHashOf(gameArgs: Hex | undefined): Hex {
+    return !gameArgs || gameArgs === "0x" ? ZERO_HASH : keccak256(gameArgs);
+}
+
+/// Off-chain mirror of `_requireCloneOf` + `_requireGameArgs`: the clone delegates to `impl`, and its
+/// CWIA args are `creator ‖ root ‖ l1Head ‖ extraData` (no game args) or `creator ‖ root ‖ l1Head ‖
+/// gameType ‖ extraData ‖ gameArgs` (DGF >= 1.6), followed by the 2-byte length.
+export function checkCloneArgs(g: {address: Hex; code: Hex; rootClaim: Hex; gameType: number; extraData: Hex}, impl: Hex,
+    gameArgs: Hex): void {
+    const code = g.code.slice(2).toLowerCase();
+    if (code.slice(2 * 65, 2 * 85) !== impl.slice(2).toLowerCase()) throw new Error(`game ${g.address}: not a clone of ${impl}`);
+    const args = code.slice(2 * 98);
+    const extra = g.extraData.slice(2).toLowerCase();
+    const ga = gameArgs.slice(2).toLowerCase();
+    const len = (n: number) => n.toString(16).padStart(4, "0");
+    const expectedTail = ga.length === 0
+        ? extra + len(84 + extra.length / 2 + 2)
+        : g.gameType.toString(16).padStart(8, "0") + extra + ga + len(88 + (extra.length + ga.length) / 2 + 2);
+    if (args.slice(40, 104) !== g.rootClaim.slice(2).toLowerCase() || args.slice(168) !== expectedTail) {
+        throw new Error(`game ${g.address}: clone args do not match the factory's gameArgs (${ga.length / 2} bytes)`);
+    }
+}
+
 export function chainOf(c: OpStackLiveCapture): OpStackLiveChain {
     const chain = OPSTACK_LIVE_CHAINS[c.chain ?? BASE_SEPOLIA.name];
     if (!chain) throw new Error(`unknown chain ${c.chain}`);
@@ -460,6 +491,7 @@ export function buildOpStackLiveProof(c: OpStackLiveCapture): OpStackLiveProof {
         anchorStateRegistryImplCodeHash: c.l1.asrImplProof.codeHash as Hex,
         disputeGameFinalityDelaySeconds: BigInt(c.l1.disputeGameFinalityDelaySeconds),
         gameImplementation: c.l1.gameImplementation,
+        gameArgsHash: gameArgsHashOf(c.l1.gameArgs),
         layout: L
     };
 
@@ -491,6 +523,7 @@ export function buildOpStackLiveProof(c: OpStackLiveCapture): OpStackLiveProof {
         if (outputRoot !== g.rootClaim.toLowerCase() && outputRoot !== g.rootClaim) {
             throw new Error(`game ${g.address}: output root ${outputRoot} != rootClaim ${g.rootClaim}`);
         }
+        if (mode === MODE.GAME) checkCloneArgs(g, c.l1.gameImplementation, c.l1.gameArgs ?? "0x");
         const st = unpackGameState(L, g.proof);
         if (!st.wasRespected) throw new Error(`game ${g.address}: wasRespectedGameTypeWhenCreated is false`);
         if (g.l2.proof && g.l2.proof.storageHash.toLowerCase() !== g.l2.header.withdrawalsRoot.toLowerCase()) {
@@ -570,6 +603,8 @@ export function forgeFixtureOf(p: OpStackLiveProof): unknown {
             anchorStateRegistryImplCodeHash: p.profile.anchorStateRegistryImplCodeHash,
             disputeGameFinalityDelaySeconds: Number(p.profile.disputeGameFinalityDelaySeconds),
             gameImplementation: p.profile.gameImplementation,
+            gameArgsHash: p.profile.gameArgsHash,
+            rootFormat: p.profile.rootFormat,
             respectedGameType: p.respectedGameType
         },
         anchorMode: c(p.anchorMode),

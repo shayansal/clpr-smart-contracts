@@ -41,6 +41,7 @@ library XLayerProfile {
             anchorStateRegistryImplCodeHash: ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH,
             disputeGameFinalityDelaySeconds: DISPUTE_GAME_FINALITY_DELAY_SECONDS,
             gameImplementation: GAME_IMPLEMENTATION,
+            gameArgsHash: bytes32(0), // DGF 1.3.0: clones carry no game args
             layout: layout()
         });
     }

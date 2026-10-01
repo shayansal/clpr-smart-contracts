@@ -65,6 +65,8 @@ export const OP_SUCCINCT_LITE_LAYOUT: OpStackLayout = {
     gameWasRespectedOffset: 0n
 };
 
+export const ZERO_HASH: Hex = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
 /// `OpStackOutputRootProof.RootFormat`.
 export const ROOT_FORMAT = {OUTPUT_ROOT: 0, SUPER_ROOT_V1: 1} as const;
 
@@ -75,6 +77,8 @@ export interface OpStackProfile {
     anchorStateRegistryImplCodeHash: Hex;
     disputeGameFinalityDelaySeconds: bigint;
     gameImplementation: Hex;
+    /// keccak256(DGF.gameArgs(respectedGameType)), or zero when the factory clones without game args.
+    gameArgsHash: Hex;
     layout: OpStackLayout;
 }
 
@@ -90,6 +94,7 @@ export const XLAYER_MAINNET_PROFILE: OpStackProfile = {
     anchorStateRegistryImplCodeHash: "0x1194081c631cd5141ef68135c5aaaa59b92a7c2df303a713c3cf81c6bab69348",
     disputeGameFinalityDelaySeconds: 302_400n,
     gameImplementation: "0x8841FA06099FEdfE7DB6962926C6A281e9E1e607",
+    gameArgsHash: ZERO_HASH,
     layout: OP_SUCCINCT_LITE_LAYOUT
 };
 
@@ -257,6 +262,7 @@ export function profileTuple(p: OpStackProfile) {
         anchorStateRegistryImplCodeHash: p.anchorStateRegistryImplCodeHash,
         disputeGameFinalityDelaySeconds: p.disputeGameFinalityDelaySeconds,
         gameImplementation: p.gameImplementation,
+        gameArgsHash: p.gameArgsHash,
         layout: p.layout
     };
 }

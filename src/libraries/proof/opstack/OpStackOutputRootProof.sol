@@ -113,6 +113,13 @@ library OpStackOutputRootProof {
         bytes32 anchorStateRegistryImplCodeHash;
         uint256 disputeGameFinalityDelaySeconds;
         address gameImplementation;
+        /// @dev keccak256 of `DisputeGameFactory.gameArgs(respectedGameType)` (DGF >= 1.6), which the
+        ///      factory appends to every clone's immutable args: absolute prestate, VM, ASR, WETH,
+        ///      L2 chain id and, for permissioned games, proposer and challenger. These are not
+        ///      immutables of the implementation, so pinning `gameImplementation` alone does not fix
+        ///      them. `bytes32(0)` means the factory clones without game args (DGF < 1.6, or an empty
+        ///      `gameArgs` entry): the clone's args must then be exactly `creator ‖ root ‖ l1Head ‖ extraData`.
+        bytes32 gameArgsHash;
         Layout layout;
     }
 
@@ -139,6 +146,7 @@ library OpStackOutputRootProof {
     error GameNotRespectedWhenCreated(address game);
     error GameCodeMismatch(address game);
     error GameImplementationMismatch(address game);
+    error GameArgsMismatch(address game);
     error GameChallengerWins(address game);
     error GameNotResolved(address game, uint8 status);
     error GameNotFinalized(address game, uint64 resolvedAt, uint64 l1Time, uint256 finalityDelaySeconds);
@@ -256,7 +264,7 @@ library OpStackOutputRootProof {
         bytes32 root,
         bool acceptProposed
     ) private pure {
-        (address game,) = _registeredGame(dp, reg, l1StateRoot, p.layout.dgfGamesSlot, root);
+        (address game, uint32 gameType) = _registeredGame(dp, reg, l1StateRoot, p.layout.dgfGamesSlot, root);
         _requireNotBlacklisted(p, dp, reg, game);
 
         // The clone must delegate to the pinned implementation: that fixes the game's semantics, its
@@ -265,6 +273,7 @@ library OpStackOutputRootProof {
         bytes memory code = RLP.readBytes(dp[DP_IDX_GAME_CODE]);
         if (keccak256(code) != gameCodeHash) revert GameCodeMismatch(game);
         _requireCloneOf(code, p.gameImplementation, game);
+        _requireGameArgs(code, p.gameArgsHash, gameType, RLP.readBytes(dp[DP_IDX_EXTRA_DATA]).length, game);
 
         bytes32 state = _slot(dp[DP_IDX_GAME_STORAGE], gameStorageRoot, p.layout.gameStateSlot);
         // forge-lint: disable-next-line(unsafe-typecast)
@@ -345,6 +354,39 @@ library OpStackOutputRootProof {
             actual := keccak256(add(code, 0x20), CLONE_HEADER_LENGTH)
         }
         if (actual != expected) revert GameImplementationMismatch(game);
+    }
+
+    /// @dev The clone's CWIA args (`code[98:]`, ending in a 2-byte length) must be what the pinned
+    ///      factory configuration produces (DisputeGameFactory 1.6 `create`):
+    ///        - without game args: `creator(20) ‖ rootClaim(32) ‖ l1Head(32) ‖ extraData ‖ len(2)`;
+    ///        - with game args:    `creator(20) ‖ rootClaim(32) ‖ l1Head(32) ‖ gameType(4) ‖ extraData
+    ///                              ‖ gameArgs ‖ len(2)`, with `keccak256(gameArgs) == gameArgsHash`.
+    ///      rootClaim and extraData are already bound by the DGF registration, so only lengths, the
+    ///      game type and the game args are checked here.
+    function _requireGameArgs(
+        bytes memory code,
+        bytes32 gameArgsHash,
+        uint32 gameType,
+        uint256 extraDataLength,
+        address game
+    ) private pure {
+        uint256 argsLength = code.length - CLONE_HEADER_LENGTH;
+        if (gameArgsHash == bytes32(0)) {
+            if (argsLength != 84 + extraDataLength + 2) revert GameArgsMismatch(game);
+            return;
+        }
+        uint256 fixedLength = 88 + extraDataLength + 2;
+        if (argsLength < fixedLength) revert GameArgsMismatch(game);
+        uint256 gameArgsOffset = CLONE_HEADER_LENGTH + 88 + extraDataLength;
+        uint256 gameArgsLength = argsLength - fixedLength;
+        bytes32 actual;
+        uint32 clonedType;
+        assembly ("memory-safe") {
+            let base := add(code, 0x20)
+            clonedType := shr(224, mload(add(base, add(CLONE_HEADER_LENGTH, 84))))
+            actual := keccak256(add(base, gameArgsOffset), gameArgsLength)
+        }
+        if (clonedType != gameType || actual != gameArgsHash) revert GameArgsMismatch(game);
     }
 
     /// @dev The root the dispute games claim: the output root itself, or the super root whose entry for

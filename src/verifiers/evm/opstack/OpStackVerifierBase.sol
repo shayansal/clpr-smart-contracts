@@ -87,6 +87,7 @@ abstract contract OpStackVerifierBase is ClprEvmBundleVerifier {
     bytes32 public immutable ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH;
     uint256 public immutable DISPUTE_GAME_FINALITY_DELAY_SECONDS;
     address public immutable GAME_IMPLEMENTATION;
+    bytes32 public immutable GAME_ARGS_HASH;
     uint256 internal immutable ASR_DISPUTE_GAME_FACTORY_SLOT;
     uint256 internal immutable ASR_ANCHOR_GAME_SLOT;
     uint256 internal immutable ASR_STARTING_ANCHOR_ROOT_SLOT;
@@ -130,6 +131,7 @@ abstract contract OpStackVerifierBase is ClprEvmBundleVerifier {
         ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH = profile_.anchorStateRegistryImplCodeHash;
         DISPUTE_GAME_FINALITY_DELAY_SECONDS = profile_.disputeGameFinalityDelaySeconds;
         GAME_IMPLEMENTATION = profile_.gameImplementation;
+        GAME_ARGS_HASH = profile_.gameArgsHash;
         OpStackOutputRootProof.Layout memory l = profile_.layout;
         ASR_DISPUTE_GAME_FACTORY_SLOT = l.asrDisputeGameFactorySlot;
         ASR_ANCHOR_GAME_SLOT = l.asrAnchorGameSlot;
@@ -155,6 +157,7 @@ abstract contract OpStackVerifierBase is ClprEvmBundleVerifier {
         p.anchorStateRegistryImplCodeHash = ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH;
         p.disputeGameFinalityDelaySeconds = DISPUTE_GAME_FINALITY_DELAY_SECONDS;
         p.gameImplementation = GAME_IMPLEMENTATION;
+        p.gameArgsHash = GAME_ARGS_HASH;
         p.layout = OpStackOutputRootProof.Layout({
             asrDisputeGameFactorySlot: ASR_DISPUTE_GAME_FACTORY_SLOT,
             asrAnchorGameSlot: ASR_ANCHOR_GAME_SLOT,
