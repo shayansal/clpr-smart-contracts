@@ -1,155 +1,261 @@
 # Arc verifier (Malachite)
 
-> **Source**: [ArcMalachiteVerifier.sol](./ArcMalachiteVerifier.sol) ·
-> storage multiproof [MptMultiProof](../../../libraries/proof/evm/MptMultiProof.sol) ·
-> Ed25519: [Ed25519Verifier](../sei/Ed25519Verifier.sol) ·
-> MPT helpers inherited from [ClprEvmBundleVerifier](../common/ClprEvmBundleVerifier.sol)
-> **Interface**: [IClprVerifier.sol](../../../interfaces/IClprVerifier.sol)
+`ArcMalachiteVerifier` is an **Arc → Hiero** verifier. Arc is Circle's EVM L1. It runs
+**Malachite**, a Rust BFT engine that implements the Tendermint algorithm, over a reth execution
+layer. The verifier checks a Malachite commit certificate (Ed25519 precommits from more than 2/3 of
+the voting power) for an Arc block, proves that the signing set is the one Arc's own nodes use for
+that height (the `ValidatorRegistry` storage at the parent block), and then proves the ClprService
+queue values with Merkle-Patricia proofs against the certified block's `stateRoot`. Arc is not
+CometBFT: votes are SSZ, not protobuf, there is no header-level validator hash, and the validator
+set is ordinary EVM storage. So it has its own adapter instead of a
+[CometBftVerifier](../cometbft/README.md) profile.
 
-An "Arc → Hiero" verifier. Arc is Circle's EVM L1 (#15). It runs **Malachite**, a BFT engine that
-implements the Tendermint algorithm, over a reth execution layer. It is not CometBFT: votes are
-SSZ, not protobuf, there is no header-level validator hash, and the validator set is ordinary EVM
-storage. So it needs its own adapter rather than a [CometBftVerifier](../cometbft/README.md)
-profile.
+All protocol facts were checked against `circlefin/arc-node` (`main`, commit `6e764023`,
+2026-09-25, still the head on 2026-10-01), its Malachite fork `circlefin/malachite` tag `v0.8.0`,
+and the live Arc testnet on 2026-10-01.
 
-Everything below was checked against `circlefin/arc-node` (main, 2026-09-25, commit `6e764023`),
-its Malachite fork `circlefin/malachite` tag `v0.8.0`, and the live Arc testnet (chain id 5042002)
-on 2026-10-01. No public Arc mainnet RPC answered on that date.
+## 2. At a glance
 
-## 1. Protocol facts (with sources)
+| | |
+|---|---|
+| Chains | Arc testnet, chain id 5042002 (`eip155:5042002`). Arc mainnet: same code path, no public mainnet RPC answered on 2026-10-01 |
+| Direction | Arc → Hiero |
+| Finality source | Malachite commit certificate: Ed25519 precommits, strictly more than 2/3 of voting power, one height and round. Final on commit |
+| Trust (one line) | Honest 2/3+ of the registry's validator set; the set is pinned by the registry storage root at H-1; bootstrap checkpoint at deploy |
+| Typical bundle | **7,862,185 gas**, **12,036 B** calldata (11 signatures, 21 validators) |
+| Bundle + rotation | **11,973,337 gas**, **28,804 B** calldata |
+| Contract size | 17,155 B runtime (EIP-170 margin 7,421 B) |
+| Status | Live-verified on Arc testnet, heights 64,897,127 and 64,897,201 (2026-10-01) |
+
+## 3. How it works
+
+```mermaid
+flowchart TD
+    A["Trust anchor (72 B)<br/>setHash ‖ registryRoot ‖ height"]
+    PH["Parent header H-1 (RLP)"]
+    PR["Registry account at stateRoot(H-1)"]
+    V["Validator list in calldata<br/>[pubkey, power]"]
+    H["Header H (RLP)"]
+    C["Commit certificate<br/>Ed25519 precommits"]
+    RO["Rotation (optional)<br/>registry root at stateRoot(H) + storage multiproof"]
+    S["ClprService account at stateRoot(H)"]
+    Q["Channel slots: queue metadata<br/>and endpoint manifest"]
+    A -- "keccak(parent) == header.parentHash" --> PH
+    PH -- "MPT account proof: storageRoot == anchor.registryRoot" --> PR
+    A -- "keccak(pubkey ‖ power) == anchor.setHash" --> V
+    PR -- "the set Arc uses for H is a function of this storage" --> V
+    V -- "Ed25519 over SSZ precommit for keccak(header H), power > 2/3" --> C
+    C -- "certifies block hash" --> H
+    H -- "stateRoot" --> S
+    H -- "stateRoot" --> RO
+    RO -- "re-derive set for H+1, new anchor" --> A
+    S -- "MPT storage proofs" --> Q
+```
+
+1. Decode the anchor `(setHash, registryRoot, height)` (`ArcMalachiteVerifier.sol:_decodeAnchor`); apply
+   any rotation hops first (`_applyHops`).
+2. Hash header H with keccak; its number must be at least the anchor height (`_step`, `_headerFields`).
+3. `keccak256(parentHeader) == header.parentHash`, and its number is H-1 (`_step`).
+4. Set pinning: the registry account proof at `stateRoot(H-1)` must give `storageRoot ==
+   registryRoot`. Arc computes the signing set for H from exactly this storage (`_verifyRegistryRoot`).
+5. The validator list in calldata hashes to `setHash` = `keccak256(‖ pubkey ‖ power (u64 BE))`
+   (`_parseValidators`).
+6. Signatures with strictly increasing indices are checked with Ed25519 over the 75-byte SSZ
+   precommit (`precommitSignBytes`) until the power is strictly above 2/3 (`_verifyCertificate`).
+7. Optional rotation: the registry root at `stateRoot(H)` and a storage multiproof re-derive the
+   set for H+1, as Arc's `abi_decode_validator_set` does (`_deriveSetHash`,
+   `MptMultiProof.sol`). The anchor becomes `(set', root', H+1)`.
+8. ClprService: account proof, channel slots and the optional endpoint manifest against
+   `stateRoot(H)` (`ClprEvmBundleVerifier.sol:_verifyServiceStorageRoot`, `_verifyChannelStorage`,
+   `_verifyEndpointManifest`).
+
+Protocol facts used (all from `arc-node` unless noted):
 
 | Item | Value | Source |
 |---|---|---|
-| Finality | Instant: a block is final once a commit certificate exists (>2/3 precommits, one height, one round) | Malachite `verify_commit_certificate` |
-| Quorum | `signed * 3 > total * 2` (strict), voting-power weighted | `core-types/src/threshold.rs` `TWO_F_PLUS_ONE.is_met` |
-| Signature | Ed25519 (32 B key, 64 B sig) over the raw sign bytes, no prehash | `crates/signer/src/local.rs` `sign_vote` → `vote.to_sign_bytes()` |
-| Sign bytes | `SSZ(Vote{typ, height, round, value, validator_address})`, extension excluded | `crates/types/src/vote.rs` `to_sign_bytes` |
-| SSZ layout (75 B) | `type u8 (Precommit = 1)` ‖ `height u64 LE` ‖ `offset(round) u32 = 37` ‖ `offset(value) u32 = 42` ‖ `address [20]` ‖ round `Option<u32>` = `01 ‖ u32 LE` ‖ value `Option<B256>` = `01 ‖ block hash` | `ssz/v1/{vote,round,nil_or_val}.rs` (`enum_behaviour = "tag"`, `Option` = union selector) |
-| Value | The EVM block hash (`ValueId(BlockHash)`) | `crates/types/src/value.rs` |
-| Validator address | `keccak256(pubkey)[0..20]` (first 20 bytes, not the Ethereum last 20) | `crates/types/src/address.rs` |
-| Signing set for height H | `ValidatorRegistry.getActiveValidatorSet()` evaluated at block **H-1** | `eth-engine/src/rpc/ethereum_rpc.rs` `get_signing_validator_set`: `block_height = consensus_height - 1` |
-| Set filtering | keep `status == Active`, `votingPower > 0`, 32-byte key | `eth-engine/src/abi_utils.rs` `abi_decode_validator_set` |
-| Registry | ERC-1967 proxy at `0x3600…0002`; ERC-7201 storage at `0xb58da0dc…c9d200` | `contracts/src/validator-manager/ValidatorRegistry.sol` |
-| Certificate RPC | `arc_getCertificate(H)` → `{height, round, block_hash, signatures[{address, signature (base64)}]}` | `crates/evm-node/src/rpc/get_certificate.rs` |
+| Quorum | `signed * 3 > total * 2`, weighted by voting power | Malachite `core-types/src/threshold.rs` |
+| Signature | Ed25519 over the raw sign bytes, no prehash | `crates/signer/src/local.rs` |
+| Sign bytes (75 B) | `type u8 (Precommit = 1)` ‖ `height u64 LE` ‖ `offset(round) u32 = 37` ‖ `offset(value) u32 = 42` ‖ `address [20]` ‖ `01 ‖ round u32 LE` ‖ `01 ‖ block hash` | `crates/types/src/vote.rs`, `ssz/v1/*` |
+| Value | The EVM block hash | `crates/types/src/value.rs` |
+| Validator address | `keccak256(pubkey)[0..20]` (first 20 bytes) | `crates/types/src/address.rs` |
+| Signing set for H | `ValidatorRegistry.getActiveValidatorSet()` at block H-1 | `eth-engine/src/rpc/ethereum_rpc.rs` |
+| Set filtering | `status == Active`, `votingPower > 0`, 32-byte key | `eth-engine/src/abi_utils.rs` |
+| Registry | ERC-1967 proxy `0x3600…0002`, ERC-7201 base `0xb58da0dc…c9d200` | `contracts/src/validator-manager/ValidatorRegistry.sol` |
+| Certificate RPC | `arc_getCertificate(H)` | `crates/evm-node/src/rpc/get_certificate.rs` |
 
-Live check (every capture): all certificate signatures verify with these sign bytes, the
-certificate's `block_hash` equals `eth_getBlockByNumber(H).hash`, and the set derived from the
-registry **storage proof** at H-1 equals `getActiveValidatorSet()` at H-1. Testnet today: 22
-registry entries, 21 effective (one has power 0), total power 30,002; certificates carry 13–14
-signatures and the power-ordered minimal subset is 11–13.
+Registry layout read by `_deriveSetHash` (base `B`): `_values.length` at `B+1`; `id = _values[i]`
+at `keccak(B+1)+i`; struct `s = keccak(id ‖ B)` with `status` at `s`, key length word at `s+1`
+(must be 65, a 32-byte long-form `bytes`), `votingPower` at `s+2`, key at `keccak(s+1)`. Entries
+Arc would skip are skipped before their key is read.
 
-## 2. Verification chain
+## 4. Bundle lifecycle
 
 ```mermaid
-flowchart LR
-    A["anchor (72 B)<br/>setHash ‖ registryRoot ‖ height"] --> P["parent header H-1<br/>keccak == header.parentHash<br/>registry storageRoot @ H-1 == registryRoot"]
-    P --> C["validators (calldata) hash == setHash<br/>Ed25519 precommits > 2/3 power<br/>over SSZ vote for keccak(header H)"]
-    C --> R{"rotation?"}
-    R -- no --> S["ClprService account + channel slots<br/>MPT @ stateRoot(H)"]
-    R -- yes --> D["registry storageRoot @ H<br/>multiproof → set for H+1<br/>anchor := (set', root', H+1)"] --> S
+sequenceDiagram
+    participant Arc as Arc node (reth + Malachite)
+    participant R as Relayer
+    participant S as ClprService (Hedera)
+    participant V as ArcMalachiteVerifier
+    R->>Arc: eth_getBlockByNumber(H-1), eth_getBlockByNumber(H)
+    R->>Arc: arc_getCertificate(H)
+    R->>Arc: eth_getProof(registry, [], H-1)
+    R->>Arc: eth_getProof(ClprService, channel slots, H)
+    opt registry changed at H
+        R->>Arc: eth_getProof(registry, set slots, H)
+    end
+    R->>S: submitBundle(proofBytes)
+    S->>V: verifyBundle(proofBytes, trustAnchor, channelContext)
+    V-->>S: queue metadata, payloads, new anchor (on rotation)
+    S->>S: store new anchor, deliver messages
 ```
 
-A **step** is `RLP([header, parentHeader, round, sigs[[index, sig]], validators[[pubkey, power]],
-parentRegistryAccountProof, rotation])`, `rotation = [] | [registryAccountProof, multiproof]`.
+## 5. Trust model
 
-1. `keccak256(header)` is the certified block hash, and the header's number is H ≥ anchor height.
-2. `keccak256(parentHeader) == header.parentHash` and its number is H-1.
-3. **Set pinning.** The registry account's `storageRoot` at `stateRoot(H-1)` must equal the anchor's
-   `registryRoot`. Arc's signing set for H is a pure function of that storage (the proxy's
-   implementation slot is in the same storage, so an upgrade changes the root too). So the
-   supplied set *is* the set that signed H. No "trusting the old set until told otherwise"
-   window exists.
-4. The supplied `[pubkey, power]` list hashes to `setHash` = `keccak256(‖ pubkey ‖ power(u64 BE))`.
-5. Signatures, strictly increasing indices, Ed25519 over the 75-byte SSZ precommit, until the
-   strict 2/3 power quorum holds.
-6. Rotation (optional): the registry root at `stateRoot(H)` and a storage multiproof re-derive the
-   set exactly as `abi_decode_validator_set` does. The anchor becomes `(set', root', H+1)`.
+Trusted:
+- An honest supermajority (more than 2/3 of voting power) of each validator set the verifier
+  accepts. A set is used only for heights whose parent state holds that exact registry storage.
+- The registry owner. `ValidatorRegistry` is `onlyOwner` (Circle, permissioned set). The verifier
+  follows what the owner writes, as Arc's nodes do.
+- The bootstrap checkpoint `(BOOTSTRAP_SET_HASH, BOOTSTRAP_REGISTRY_ROOT, BOOTSTRAP_HEIGHT)` fixed
+  at deployment and used by `verifyConfig`.
+- The Hedera-side upgrade keys of the deployed contracts, as for every CLPR verifier.
 
-`verifyBundle` = `RLP([step, hops[], serviceAccountProof, storageProof, bundleContent
-(, manifestStorageProof, manifestPreimage)])`. Hops are rotation steps. The account proof, channel
-slots (+1, +2, +4, +5, +16, plus the last-message running hash) and manifest come from
-`ClprEvmBundleVerifier` against `stateRoot(H)`.
+Not trusted: the relayer, the RPC providers, and the validator list and proofs in calldata. All of
+them are checked against hashes.
 
-`verifyConfig` = `RLP([step, hops[], serviceAccountProof, slot25Proof, ledgerConfiguration])`,
-starting from the deploy-time checkpoint `(BOOTSTRAP_SET_HASH, BOOTSTRAP_REGISTRY_ROOT,
-BOOTSTRAP_HEIGHT)`. It proves ClprService `_config.serviceAddress` (slot 25, short-bytes layout) by
-slot and value, and the ledger configuration's chain id must match the profile.
+To forge a bundle an attacker must control more than 2/3 of the voting power of a set the verifier
+accepts, or the registry owner.
 
-### Registry → set derivation (`_deriveSetHash`)
+## 6. Proof format
 
-Storage base `B = 0xb58da0dc…c9d200`. Per active entry `i`, it reads:
-`_values.length` at `B+1` → `id = _values[i]` at `keccak(B+1)+i` → struct `s = keccak(id ‖ B)`:
-`status` at `s` (uint8), `votingPower` at `s+2` (uint64), the key-length word at `s+1` (must be
-`65` = 32-byte long-form `bytes`), and the key at `keccak(s+1)`. Entries that Arc's decoder would
-skip are skipped here too, before their key is read.
+Trust anchor (72 B): `setHash (32) ‖ registryRoot (32) ‖ height (u64 BE)`.
 
-**MptMultiProof.** 21 validators need 106 slot lookups. Independent `eth_getProof` paths are
-95 KB, but they share most nodes. The multiproof sends each distinct node once (162 nodes,
-13.3 KB live), hashes it once, and gives per-lookup paths as 2-byte pool indices. Each node is
-still checked against its parent's hash reference. Paths must be fully consumed and cannot run
-past the node that ends a lookup. The walker scans RLP in place. It costs 3.83M gas for the
-live set, where an `OZ RLP.decodeList`-based walk cost ~12M.
+`verifyBundle` proof bytes: `RLP([step, hops[], serviceAccountProof, storageProof, bundleContent
+(, manifestStorageProof, manifestPreimage)])`.
 
-## 3. Gas and calldata on Hedera terms
+| Field | Type | Meaning |
+|---|---|---|
+| `step` | RLP list | `[header, parentHeader, round, sigs, validators, parentRegistryAccountProof, rotation]` |
+| `header`, `parentHeader` | bytes | RLP Arc headers H and H-1 |
+| `round` | uint | Certificate round |
+| `sigs` | list of `[index, sig(64)]` | Strictly increasing indices into `validators` |
+| `validators` | list of `[pubkey(32), power]` | Must hash to the anchor's `setHash` |
+| `parentRegistryAccountProof` | list of bytes | Registry account at `stateRoot(H-1)` |
+| `rotation` | `[]` or `[registryAccountProof, multiproof]` | Registry at `stateRoot(H)` and the set storage |
+| `hops` | list of steps | Rotation steps applied before `step` |
+| `serviceAccountProof`, `storageProof` | MPT proofs | ClprService account and channel slots at `stateRoot(H)` |
+| `bundleContent` | bytes | Protobuf with the message payloads |
 
-Anvil `eth_estimateGas` for the whole transaction, on the live testnet fixture
-(`npm run test:e2e:arc-live`). Hedera's limits are 15,000,000 gas and 131,072 B of calldata.
+`verifyConfig`: `RLP([step, hops[], serviceAccountProof, slot25Proof, ledgerConfiguration])` from
+the bootstrap checkpoint. It proves ClprService `_config.serviceAddress` at slot 25 and checks the
+chain id.
 
-| Live (testnet, 21 validators) | Sigs | Gas | Calldata | Fits |
+Profile (constructor): `chainId`, `ed25519Verifier`, `registry`, `bootstrapSetHash`,
+`bootstrapRegistryRoot`, `bootstrapHeight`. See [docs/chains/arc.md](../../../../docs/chains/arc.md).
+
+## 7. Validator-set rotation
+
+Any write to the registry storage (register, activate, remove, power change, proxy upgrade) changes
+its storage root. After such a change at block R, no bundle verifies until the anchor crosses R
+(step 4). The relayer watches registry events and submits a bundle with `rotation` for block R.
+The verifier re-derives the set from storage, so no signature over the set is needed.
+
+- Cost on live data: 11,973,337 gas and 28,804 B for bundle + rotation. Set derivation alone is
+  3,825,658 gas and 13,412 B (21 validators, 106 slot lookups).
+- `MptMultiProof` sends each distinct trie node once: 162 nodes, 13,309 B on live data, where
+  separate `eth_getProof` paths would be about 95 KB.
+- Catch-up: one rotation per transaction. A rotation hop plus a bundle in one transaction measured
+  19,154,725 gas, which does not fit; submit each rotation as its own bundle.
+- Rotation is a liveness duty for the relayer. A missed rotation stops the channel; it does not
+  let a wrong set sign.
+
+## 8. Gas and calldata
+
+Anvil `eth_estimateGas` of the full transaction, live Arc testnet fixture
+`test/e2e/fixtures/arc-live/testnet.json` (2026-10-01, 21 validators, total power 30,002),
+`npm run test:e2e:arc-live`. Hedera limits: 15,000,000 gas, 131,072 B calldata.
+
+| Case | Signatures | Gas | Calldata | Fits |
 |---|---|---|---|---|
-| `verifyBundle`, typical | 11–13 | **7.86M – 9.07M** | 12.0 KB | yes |
-| `verifyBundle` + rotation (re-derive set from registry multiproof) | 11–13 | **11.97M – 13.18M** | 28.8 KB | yes |
-| Set derivation alone | — | 3.83M | 13.4 KB | — |
-| Rotation hop + bundle in one transaction | 22–26 | 19.2M – 21.6M | 35 KB | **no** → submit the rotation as its own bundle |
+| `verifyBundle` | 11 | 7,862,185 | 12,036 B | yes |
+| `verifyBundle` + rotation | 11 | 11,973,337 | 28,804 B | yes |
+| Set derivation alone (harness) | 0 | 3,825,658 | 13,412 B | n/a |
+| Rotation hop + bundle | 22 | 19,154,725 | 35,044 B | **no** |
 
-Ed25519 costs about 640k gas per signature (pure Solidity; Hedera has no Ed25519 precompile).
-The fixed part is about 1.1M: header, parent header, two account proofs and five storage proofs.
+Ed25519 is pure Solidity (Hedera has no Ed25519 precompile) at roughly 0.64M gas per signature,
+derived from these rows. Estimate, not measured: the testnet powers are 11 × 2,000, 8 × 1,000 and
+2 × 1, so a certificate holding mostly low-power signers can need 16 signatures, about 11.1M gas
+for a bundle and about 15.2M for a bundle + rotation, which would not fit.
 
-- **Worst case.** The fixed part is about 0.82M (7.86M − 11 × 0.64M). The relay sends the
-  power-ordered minimal subset of the signatures in the stored certificate. If that certificate
-  happens to hold mostly low-power signers, today's testnet set (11 × 2000, 8 × 1000, 2 × 1) can
-  need up to **16** signatures. That gives ≈ 11.1M for a typical bundle (fits) and ≈ 15.2M for a
-  rotation bundle, which is **just over 15M**. A rotation must use block R's certificate (the
-  first block whose state holds the new registry), so the relay cannot pick a "better" block.
-  Mitigations: (a) split a rotation into two transactions, "certify R" and then "derive the set
-  from stateRoot(R)", which needs a small checkpoint contract because the verifier is stateless;
-  (b) cheaper Ed25519 (CometBFT README §6.4: SNARK or a precompile). Limits as the set grows:
-  ~22 signatures per typical bundle and ~16 per rotation bundle.
-- **Rotation cadence.** A relay must submit a rotation bundle at **every** block R where the
-  registry storage changes (any owner call: register, activate, remove, power change, proxy
-  upgrade). After such a change, no later bundle verifies until the anchor crosses it (step 3).
-  That is a liveness duty, not a safety risk. The relay finds R by watching registry events.
+## 9. Limits and known gaps
 
-## 4. Trust assumptions and limits
+- **Proof window.** Public Arc RPCs (Blockdaemon, PublicNode) serve `eth_getProof` only at the
+  head block. `rpc.testnet.arc.network` serves `arc_getCertificate` but not `eth_getProof`. The
+  fixture builder races the head; a production relayer needs its own reth node with a proof window.
+- **Worst-case rotation.** A rotation at a block whose certificate needs 16 signatures is estimated
+  just above 15M gas (section 8). Splitting it into "certify R" and "derive the set from
+  stateRoot(R)" needs a small checkpoint contract, because the verifier holds no state.
+- **No ClprService on Arc.** The fixture proves the channel slots of the `0x3600…0001` system proxy
+  as a stand-in (absent slots, MPT exclusion proofs, zeroed metadata). `verifyConfig` runs end to
+  end and stops at slot 25 with `ServiceAddressSlotMismatch`, as expected.
+- **Mainnet.** Not live-verified: no public Arc mainnet RPC answered on 2026-10-01.
+- **Hiero → Arc** is not part of this verifier.
 
-- **Honest supermajority** of each set the verifier trusts. A set is used only for heights whose
-  parent state still holds that exact registry storage.
-- **Permissioned set.** `ValidatorRegistry` is `onlyOwner` (Circle). The verifier follows whatever
-  the owner writes, as Arc's own nodes do.
-- **Bootstrap.** `verifyConfig` trusts the deploy-time checkpoint.
-- **Proof availability.** Public Arc RPCs (Blockdaemon, PublicNode, dRPC) serve `eth_getProof`
-  only at the head block ("distance to target block exceeds maximum proof window"). A relay
-  therefore needs its own reth with a proof window, or it must race the head as the fixture
-  builder does (staggered `latest` batches until two land on consecutive blocks H-1, H). This is
-  practical for a fixture but fragile for production. The official RPC `rpc.testnet.arc.network`
-  does not serve `eth_getProof` at all. It does serve `arc_getCertificate`.
-- **Stand-in service.** No ClprService is deployed on Arc, so the fixtures prove the channel slots
-  of the `0x3600…0001` system proxy (absent slots → MPT exclusion proofs → zeroed metadata).
-  `verifyConfig` is exercised end to end on live data and correctly rejects at slot 25.
-- **Replay.** The verifier has no state. Old heights fail the anchor height check, and stale queue
-  metadata is rejected by ClprService's progress checks, as for the other EVM verifiers.
-- **Size.** 17,155 B (7.4 KB under EIP-170).
+## 10. Upgrades and forks
 
-## 5. Tests
+- A proxy upgrade of the registry changes its storage root and is handled as a rotation.
+- A change to the vote encoding, the address derivation, the set selection rule (H-1) or the
+  header RLP breaks verification: bundles fail closed and a new verifier is needed.
+- Relation to the fork-aware verifier ADR (`ADR/2026-10-01-fork-aware-verifiers.md` in the spec
+  fork, draft PR LFDT-CLPR/clpr-spec#1): this verifier does not implement fork profiles or the ADR's
+  typed upgrade reverts yet. A layout change (header fields, SSZ vote layout, registry slots) would
+  need a fork profile; a semantic change (quorum rule, set selection) needs a new verifier and a
+  `ClprChannelSuccession` to it. Until then an unhandled upgrade stalls the channel; it does not
+  accept a wrong proof.
 
-| | What |
-|---|---|
-| `test/verifiers/evm/arc/ArcMalachiteVerifier.t.sol` | 30 Foundry tests on the live fixture: real-Ed25519 bundle, rotation, hop, set derivation; rejects flipped signature, replayed certificate, wrong round, below / exactly 2/3, duplicate or out-of-range signer, wrong set, stale height, tampered header, wrong parent header, parent registry proof from another block, registry-root mismatch, malformed rotation, multiproof tampering (trailing path, wrong root, swapped node), ClprService storage proof from another block or channel, wrong chain id, slot 25 mismatch, SSZ sign-bytes layout |
-| `test/e2e/tests/verifiers/arc-live.spec.ts` | Same fixture on anvil through the production contract, with gas and calldata measured per transaction |
-| `test/e2e/relay/{arc,evmHeader,buildArcLiveFixture,exportArcForgeFixture}.ts` | Relay encoding, the live capture (with off-chain checks), and the Foundry export |
+## 11. Running it
 
 ```bash
-forge test --match-path 'test/verifiers/evm/arc/*'
-forge build && npm run test:e2e:arc-live
-npm run arc-live:refresh && npx tsx test/e2e/relay/exportArcForgeFixture.ts
+forge test --match-path 'test/verifiers/evm/arc/*'          # 30 Foundry tests
+forge test --match-contract ArcComplianceTest             # 28 compliance tests
+forge build && npm run test:e2e:arc-live                     # 15 anvil replay tests + gas table
+npm run arc-live:refresh                                     # re-record the live fixture
+npx tsx test/e2e/relay/exportArcForgeFixture.ts              # re-export the Foundry fixture
 ```
+
+Coverage. Foundry (30): live bundle, rotation, hop, set derivation; rejects a flipped signature byte, a
+certificate replayed onto another header, a wrong round, power below or exactly 2/3, a duplicate or
+out-of-range signer, a wrong set, a stale height, a tampered header, a wrong parent header, a parent
+registry proof from another block, a registry-root mismatch, a malformed rotation, multiproof
+tampering (trailing path, wrong root, swapped node), a storage proof from another block or channel,
+a wrong chain id and a slot 25 mismatch. The anvil spec repeats the main cases through the
+production contract.
+
+## 12. Files
+
+| File | What |
+|---|---|
+| `src/verifiers/evm/arc/ArcMalachiteVerifier.sol` | The verifier |
+| `src/libraries/proof/evm/MptMultiProof.sol` | Deduplicated storage multiproof walker |
+| `src/verifiers/evm/sei/Ed25519Verifier.sol` | Pure-Solidity Ed25519 (shared) |
+| `test/verifiers/evm/arc/ArcMalachiteVerifier.t.sol` | 30 Foundry tests on live data, with negative cases |
+| `test/verifiers/evm/arc/ArcMalachiteVerifierHarness.sol` | Harness: set derivation, Ed25519 stub for threshold cases |
+| `test/verifiers/evm/arc/fixtures/arc-testnet.json` | Foundry export of the live fixture |
+| `test/e2e/fixtures/arc-live/testnet.json` | Raw live RPC responses, two snapshots |
+| `test/e2e/relay/arc.ts` | Relay encoding (steps, multiproof, signature selection) |
+| `test/e2e/relay/buildArcLiveFixture.ts` | Live capture with off-chain checks |
+| `test/e2e/relay/exportArcForgeFixture.ts` | Foundry fixture export |
+| `test/verifiers/compliance/ArcComplianceTest.t.sol` | Shared `IClprVerifier` compliance suite (28 cases) on synthetic chain data, Ed25519 stubbed by the harness |
+| `test/verifiers/compliance/EvmCertifiedStateCompliance.sol` | Compliance-adapter body shared by the Arc and Plasma adapters |
+| `test/e2e/tests/verifiers/arc-live.spec.ts` | Anvil replay spec with gas and calldata |
+
+## 13. References
+
+- circlefin/arc-node: `crates/types/src/{vote.rs,value.rs,address.rs,ssz/v1}`,
+  `crates/signer/src/local.rs`, `crates/evm-node/src/rpc/get_certificate.rs`,
+  `eth-engine/src/{rpc/ethereum_rpc.rs,abi_utils.rs}`,
+  `contracts/src/validator-manager/ValidatorRegistry.sol` — https://github.com/circlefin/arc-node
+- circlefin/malachite `v0.8.0`: `core-types/src/threshold.rs` — https://github.com/circlefin/malachite
+- Arc testnet RPCs: `https://rpc.testnet.arc.network`, `https://rpc.blockdaemon.testnet.arc.network`,
+  `https://arc-testnet-rpc.publicnode.com`
+- Hedera limits: 15M gas per transaction, 128 KB jumbo EthereumTransaction calldata
