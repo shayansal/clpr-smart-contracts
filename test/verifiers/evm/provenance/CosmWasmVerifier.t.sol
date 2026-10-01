@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {CosmWasmVerifier} from "@hiero-ledger/clpr/verifiers/evm/provenance/CosmWasmVerifier.sol";
 import {CometBftCommitAccumulator} from "@hiero-ledger/clpr/verifiers/evm/cometbft/CometBftCommitAccumulator.sol";
+import {CometBftStoreProofBase} from "@hiero-ledger/clpr/verifiers/evm/cometbft/CometBftStoreProofBase.sol";
 import {CometBftLightClient} from "@hiero-ledger/clpr/verifiers/evm/cometbft/CometBftLightClient.sol";
 import {ClprEvmBundleVerifier} from "@hiero-ledger/clpr/verifiers/evm/common/ClprEvmBundleVerifier.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
@@ -319,7 +320,7 @@ contract CosmWasmVerifierTest is CosmWasmSyntheticChain {
         p.multistore = ms;
         p.entry = t.entryL;
         p.content = true;
-        vm.expectRevert(CosmWasmVerifier.HeightTooOld.selector);
+        vm.expectRevert(CometBftStoreProofBase.HeightTooOld.selector);
         verifier.verifyBundle(_encode(p), _anchor(hashA, 121), _ctx());
     }
 
@@ -332,7 +333,7 @@ contract CosmWasmVerifierTest is CosmWasmSyntheticChain {
         p.multistore = ms;
         p.entry = t.entryL;
         p.content = true;
-        vm.expectRevert(CosmWasmVerifier.ValidatorSetHashMismatch.selector);
+        vm.expectRevert(CometBftStoreProofBase.ValidatorSetHashMismatch.selector);
         verifier.verifyBundle(_encode(p), _anchor(hashA, ANCHOR_HEIGHT), _ctx());
     }
 
@@ -421,14 +422,14 @@ contract CosmWasmVerifierTest is CosmWasmSyntheticChain {
             ClprTypes.ChannelContext({channelId: keccak256("channel-2"), remoteServiceAddress: SERVICE})
         );
         bytes memory proof = _bundle(t, 120, setA, hashA, t.entryL);
-        vm.expectRevert(CosmWasmVerifier.StorageKeyMismatch.selector);
+        vm.expectRevert(CometBftStoreProofBase.StorageKeyMismatch.selector);
         verifier.verifyBundle(proof, _anchor(hashA, ANCHOR_HEIGHT), ctx2);
     }
 
     function test_reverts_serviceEntryAsQueueRecord() public {
         Tree memory t = _state(_record(1, 3, 7, 2), bytes32(0));
         bytes memory built2 = _bundle(t, 120, setA, hashA, t.entryR);
-        vm.expectRevert(CosmWasmVerifier.StorageKeyMismatch.selector);
+        vm.expectRevert(CometBftStoreProofBase.StorageKeyMismatch.selector);
         verifier.verifyBundle(built2, _anchor(hashA, ANCHOR_HEIGHT), _ctx());
     }
 
@@ -455,7 +456,7 @@ contract CosmWasmVerifierTest is CosmWasmSyntheticChain {
         );
         Tree memory t = _state(_record(1, 3, 7, 2), bytes32(0));
         bytes memory built5 = _bundle(t, 120, setA, hashA, t.entryL);
-        vm.expectRevert(CosmWasmVerifier.InvalidStoreKey.selector);
+        vm.expectRevert(CometBftStoreProofBase.InvalidStoreKey.selector);
         bankVerifier.verifyBundle(built5, _anchor(hashA, ANCHOR_HEIGHT), _ctx());
     }
 
@@ -481,7 +482,7 @@ contract CosmWasmVerifierTest is CosmWasmSyntheticChain {
         Tree memory t = _state(_record(0, 0, 0, 0), bytes32(0));
         bytes memory other = hex"ee184aa5ecc3765b1aa6a6be3b530bfcee73f507adaa8442c4709cc4aa62fed6";
         bytes memory built6 = _config(t, _ledgerConfig(other));
-        vm.expectRevert(CosmWasmVerifier.StorageKeyMismatch.selector);
+        vm.expectRevert(CometBftStoreProofBase.StorageKeyMismatch.selector);
         verifier.verifyConfig(built6, CHANNEL, "");
     }
 
@@ -500,7 +501,7 @@ contract CosmWasmVerifierTest is CosmWasmSyntheticChain {
     function test_reverts_badAnchorAndAddress() public {
         Tree memory t = _state(_record(1, 3, 7, 2), bytes32(0));
         bytes memory proof = _bundle(t, 120, setA, hashA, t.entryL);
-        vm.expectRevert(CosmWasmVerifier.InvalidTrustAnchor.selector);
+        vm.expectRevert(CometBftStoreProofBase.InvalidTrustAnchor.selector);
         verifier.verifyBundle(proof, hex"00", _ctx());
         bytes memory ctx21 = ClprTypes.encodeChannelContext(
             ClprTypes.ChannelContext({channelId: CHANNEL, remoteServiceAddress: new bytes(21)})
@@ -517,7 +518,7 @@ contract CosmWasmVerifierTest is CosmWasmSyntheticChain {
         p.multistore = ms;
         p.entry = t.entryL;
         p.content = true;
-        vm.expectRevert(CosmWasmVerifier.InvalidHeaderRef.selector);
+        vm.expectRevert(CometBftStoreProofBase.InvalidHeaderRef.selector);
         verifier.verifyBundle(_encode(p), _anchor(hashA, ANCHOR_HEIGHT), _ctx());
     }
 }

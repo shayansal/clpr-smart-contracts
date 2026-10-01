@@ -7,8 +7,8 @@ import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobufHelpers as PB} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {CometBftProofCodec as Codec} from "@hiero-ledger/clpr/libraries/proof/cometbft/CometBftProofCodec.sol";
-import {Ics23Lib} from "@hiero-ledger/clpr/libraries/proof/cometbft/Ics23Lib.sol";
 import {CometBftCommitAccumulator} from "@hiero-ledger/clpr/verifiers/evm/cometbft/CometBftCommitAccumulator.sol";
+import {CometBftStoreProofBase} from "@hiero-ledger/clpr/verifiers/evm/cometbft/CometBftStoreProofBase.sol";
 
 /// @title CosmWasmVerifier
 /// @notice "CosmWasm chain → Hiero" verifier: CometBFT finality plus an ICS-23 proof of the peer
@@ -41,7 +41,7 @@ import {CometBftCommitAccumulator} from "@hiero-ledger/clpr/verifiers/evm/cometb
 ///     service item  key  "clpr_service" (cw-storage-plus Item)
 ///                   value own canonical address ‖ manifest commitment (keccak256 of the protobuf
 ///                         ClprEndpointManifest, or 32 zero bytes when none is set)
-contract CosmWasmVerifier is ClprEvmBundleVerifier {
+contract CosmWasmVerifier is ClprEvmBundleVerifier, CometBftStoreProofBase {
     /// @param accumulator              {CometBftCommitAccumulator} deployed for this chain.
     /// @param storeKey                 IAVL store of wasmd ("wasm").
     /// @param bootstrapValidatorsHash  Validator-set hash trusted at `bootstrapHeight`.
@@ -65,46 +65,22 @@ contract CosmWasmVerifier is ClprEvmBundleVerifier {
         bytes ledgerConfiguration; // 8  (config)
     }
 
-    uint256 internal constant ANCHOR_LENGTH = 40;
     uint8 internal constant CONTRACT_STORE_PREFIX = 0x03;
     bytes internal constant QUEUE_NAMESPACE = hex"000a636c70725f7175657565"; // len16 ‖ "clpr_queue"
     bytes internal constant SERVICE_ITEM_KEY = "clpr_service";
     uint256 internal constant QUEUE_RECORD_LENGTH = 90;
     uint8 internal constant QUEUE_RECORD_VERSION = 1;
 
-    CometBftCommitAccumulator public immutable ACCUMULATOR;
-    bytes32 public immutable STORE_KEY_HASH;
-    bytes32 public immutable BOOTSTRAP_VALIDATORS_HASH;
-    uint64 public immutable BOOTSTRAP_HEIGHT;
-
-    error InvalidProfile();
-    error InvalidTrustAnchor();
-    error MissingHeader();
-    error MissingStateProof();
-    error MissingStorageEntry();
     error MissingBundleContent();
     error MissingLedgerConfig();
-    error InvalidHeaderRef();
-    error ValidatorSetHashMismatch();
-    error HeightTooOld();
-    error InvalidStoreKey();
-    error InvalidStoreRoot();
-    error StorageKeyMismatch();
     error EntryNotFound();
-    error NonExistenceValueNotEmpty();
     error InvalidQueueRecord();
     error InvalidServiceEntry();
     error ManifestProofPairMismatch();
 
-    constructor(Profile memory p) {
-        if (address(p.accumulator) == address(0) || p.storeKey.length == 0 || p.bootstrapValidatorsHash == bytes32(0)) {
-            revert InvalidProfile();
-        }
-        ACCUMULATOR = p.accumulator;
-        STORE_KEY_HASH = keccak256(p.storeKey);
-        BOOTSTRAP_VALIDATORS_HASH = p.bootstrapValidatorsHash;
-        BOOTSTRAP_HEIGHT = p.bootstrapHeight;
-    }
+    constructor(Profile memory p)
+        CometBftStoreProofBase(p.accumulator, p.storeKey, p.bootstrapValidatorsHash, p.bootstrapHeight)
+    {}
 
     // ─────────────────────────────────────────────────────────────────────────
     //   IClprVerifier
@@ -145,7 +121,7 @@ contract CosmWasmVerifier is ClprEvmBundleVerifier {
         }
 
         if (h.nextValidatorsHash != anchorHash) {
-            newTrustAnchor = abi.encodePacked(h.nextValidatorsHash, h.height + 1);
+            newTrustAnchor = _nextAnchor(h);
             newTrustAnchorId = newTrustAnchor;
         }
         messagePayloads = _decodeBundleContent(p.bundleContent);
@@ -184,7 +160,7 @@ contract CosmWasmVerifier is ClprEvmBundleVerifier {
             ClprTypes.ChannelContext({channelId: channelId, remoteServiceAddress: serviceAddress})
         );
         chainId = ACCUMULATOR.chainId();
-        initialTrustAnchor = abi.encodePacked(h.nextValidatorsHash, h.height + 1);
+        initialTrustAnchor = _nextAnchor(h);
         initialTrustAnchorId = initialTrustAnchor;
         endpointManifest = endpointManifestProofBytes.length == 0
             ? _uninitializedEndpointManifest(serviceAddress)
@@ -219,89 +195,18 @@ contract CosmWasmVerifier is ClprEvmBundleVerifier {
         height = h.height;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //   Headers
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// @dev Hops, then the state header, then app_hash → store root.
+    /// @dev Hops, then the state header, then app_hash → `wasm` store root.
     function _verifiedStoreRoot(Payload memory p, bytes32 setHash, uint64 minHeight)
         internal
         view
         returns (CometBftCommitAccumulator.Header memory h, bytes32 storeRoot)
     {
-        if (p.header.length == 0) revert MissingHeader();
-        if (p.multistoreProof.length == 0) revert MissingStateProof();
-        for (uint256 i; i < p.hops.length; ++i) {
-            h = _resolveHeader(p.hops[i], setHash, minHeight);
-            setHash = h.nextValidatorsHash;
-            minHeight = h.height + 1;
-        }
-        h = _resolveHeader(p.header, setHash, minHeight);
-
-        Ics23Lib.ExistenceProof memory ms = Codec.parseExistenceProof(p.multistoreProof);
-        if (keccak256(ms.key) != STORE_KEY_HASH) revert InvalidStoreKey();
-        Ics23Lib.verifyMembershipTendermint(ms, h.appHash, ms.key, ms.value);
-        if (ms.value.length != 32) revert InvalidStoreRoot();
-        storeRoot = Codec.load32(ms.value, 0);
-    }
-
-    /// @dev HeaderRef{1 validator_set, 2 signed_header} (inline) or {3 header_hash} (accumulated).
-    function _resolveHeader(bytes memory ref, bytes32 setHash, uint64 minHeight)
-        internal
-        view
-        returns (CometBftCommitAccumulator.Header memory h)
-    {
-        bytes memory valSet;
-        bytes memory signedHeader;
-        bytes memory headerHash;
-        uint256 off;
-        while (off < ref.length) {
-            (uint64 fn_, uint8 wt, uint256 off2) = PB.decodeFieldKey(ref, off);
-            off = off2;
-            if (wt != 2) off = PB.skipField(ref, off, wt);
-            else if (fn_ == 1) (valSet, off) = PB.decodeLengthDelimited(ref, off);
-            else if (fn_ == 2) (signedHeader, off) = PB.decodeLengthDelimited(ref, off);
-            else if (fn_ == 3) (headerHash, off) = PB.decodeLengthDelimited(ref, off);
-            else off = PB.skipField(ref, off, wt);
-        }
-        if (headerHash.length == 0) {
-            if (valSet.length == 0 || signedHeader.length == 0) revert InvalidHeaderRef();
-            (, h) = ACCUMULATOR.checkHeader(valSet, signedHeader, setHash, minHeight);
-        } else {
-            if (headerHash.length != 32 || valSet.length != 0 || signedHeader.length != 0) revert InvalidHeaderRef();
-            // forge-lint: disable-next-line(unsafe-typecast)
-            h = ACCUMULATOR.finalizedHeader(bytes32(headerHash));
-            if (h.validatorsHash != setHash) revert ValidatorSetHashMismatch();
-            if (h.height < minHeight) revert HeightTooOld();
-        }
+        return _verifiedStoreRoot(p.header, p.hops, p.multistoreProof, setHash, minHeight);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     //   Storage
     // ─────────────────────────────────────────────────────────────────────────
-
-    /// @dev StorageProofEntry{1 key, 2 value, 3 IAVL CommitmentProof}. The key must equal
-    ///      `expectedKey`; existence proofs return the value, non-existence proofs return (false, "").
-    function _proveEntry(bytes memory entry, bytes32 storeRoot, bytes memory expectedKey)
-        internal
-        pure
-        returns (bool exists, bytes memory value)
-    {
-        if (entry.length == 0) revert MissingStorageEntry();
-        bytes memory key;
-        bytes memory proof;
-        (key, value, proof) = Codec.parseStorageProofEntry(entry);
-        if (keccak256(key) != keccak256(expectedKey)) revert StorageKeyMismatch();
-        (bool isExistence, Ics23Lib.ExistenceProof memory ep, Ics23Lib.NonExistenceProof memory nep) =
-            Codec.parseCommitmentProof(proof);
-        if (isExistence) {
-            Ics23Lib.verifyMembershipIavl(ep, storeRoot, key, value);
-            exists = true;
-        } else {
-            if (value.length != 0) revert NonExistenceValueNotEmpty();
-            Ics23Lib.verifyNonMembershipIavl(nep, storeRoot, key);
-        }
-    }
 
     /// @dev The service item must exist and hold `service ‖ commitment(32)`. Returns the
     ///      commitment (zero when no manifest is set).
@@ -408,13 +313,6 @@ contract CosmWasmVerifier is ClprEvmBundleVerifier {
                 off = PB.skipField(data, off, wt);
             }
         }
-    }
-
-    function _decodeAnchor(bytes calldata anchor) internal pure returns (bytes32 setHash, uint64 height) {
-        if (anchor.length != ANCHOR_LENGTH) revert InvalidTrustAnchor();
-        setHash = bytes32(anchor[0:32]);
-        height = uint64(bytes8(anchor[32:40]));
-        if (setHash == bytes32(0)) revert InvalidTrustAnchor();
     }
 
     /// @dev wasmd builds 32-byte contract addresses (`BuildContractAddressClassic`). Provenance
