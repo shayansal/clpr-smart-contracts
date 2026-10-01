@@ -8,6 +8,7 @@ import {TezosLightClient} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosLigh
 import {TezosContextVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosContextVerifier.sol";
 import {TezosVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosVerifier.sol";
 import {TezosContextProof} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosContextProof.sol";
+import {TezosLibHarness} from "./TezosVerifier.t.sol";
 import {EtherlinkCementedState} from "@hiero-ledger/clpr/verifiers/evm/tezos/EtherlinkCementedState.sol";
 
 /// @notice TezosVerifier against real Tezos mainnet data (test/e2e/fixtures/tezos-live, re-record
@@ -119,6 +120,23 @@ contract TezosLiveTest is Test {
         (value,) = v.verifyContextValue(f, anchor, steps, proof);
         emit log_named_uint("rotation (cached tz1/tz3) gas", g - gasleft());
         assertEq(value, vm.parseJsonBytes(j, ".derived.tzbtc.value"));
+    }
+
+    /// @dev The cost of re-drawing the attestation rights: the live sampler (196 delegates), the
+    ///      level's real signers, counting until the 4,667-slot threshold.
+    function test_live_slotDrawCost() public {
+        TezosLibHarness lib = new TezosLibHarness();
+        uint256[] memory signers = vm.parseJsonUintArray(j, ".derived.signerSupport");
+        (uint256 counted, uint256 used) = lib.countSigned(
+            vm.parseJsonBytes(j, ".derived.samplerValue"),
+            vm.parseJsonBytes32(j, ".derived.seed"),
+            vm.parseJsonUint(j, ".derived.cyclePosition"),
+            signers,
+            7000,
+            4667
+        );
+        emit log_named_uint("slot re-draw until 4,667 signer slots (gas)", used);
+        assertEq(counted, 4667);
     }
 
     function test_live_etherlinkCementedState() public {

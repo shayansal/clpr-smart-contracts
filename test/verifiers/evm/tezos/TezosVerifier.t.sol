@@ -26,6 +26,25 @@ contract TezosLibHarness {
         return TezosContextProof.verify(root, steps, proof, type(uint256).max, bytes32(0));
     }
 
+    /// Signer slots counted until `threshold` (live cost measurement).
+    function countSigned(
+        bytes memory sampler,
+        bytes32 seed,
+        uint256 position,
+        uint256[] memory signers,
+        uint256 committee,
+        uint256 threshold
+    ) external view returns (uint256 counted, uint256 gasUsed) {
+        TezosSampler.Sampler memory s = TezosSampler.parse(sampler);
+        bytes memory flags = new bytes(s.n);
+        for (uint256 i = 0; i < signers.length; i++) {
+            flags[signers[i]] = 0x01;
+        }
+        gasUsed = gasleft();
+        counted = TezosSampler.countSignedSlots(s, seed, position, committee, threshold, flags);
+        gasUsed -= gasleft();
+    }
+
     /// Slots in [0, committee) owned by `index` (signer flag set only for it).
     function slotsOf(bytes memory sampler, bytes32 seed, uint256 position, uint256 committee, uint256 index)
         external
