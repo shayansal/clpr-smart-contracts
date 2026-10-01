@@ -5,6 +5,7 @@ import {console} from "forge-std/Test.sol";
 import {OpStackVerifier} from "@hiero-ledger/clpr/verifiers/evm/opstack/OpStackVerifier.sol";
 import {OpStackProposedVerifier} from "@hiero-ledger/clpr/verifiers/evm/opstack/OpStackProposedVerifier.sol";
 import {OpStackVerifierBase} from "@hiero-ledger/clpr/verifiers/evm/opstack/OpStackVerifierBase.sol";
+import {OpStackBundleVerifierBase} from "@hiero-ledger/clpr/verifiers/evm/opstack/OpStackBundleVerifierBase.sol";
 import {EthL1StateVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/EthL1StateVerifier.sol";
 import {IEthL1StateVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/lib/IEthL1StateVerifier.sol";
 import {ClprEvmBundleVerifier} from "@hiero-ledger/clpr/verifiers/evm/common/ClprEvmBundleVerifier.sol";
@@ -220,8 +221,8 @@ contract OpStackVerifierTest is OpStackFixture {
     // ── tiers ────────────────────────────────────────────────────────────────
 
     function test_finality_labels() public view {
-        assertEq(uint8(finalized.FINALITY()), uint8(OpStackVerifierBase.Finality.FINALIZED));
-        assertEq(uint8(proposed.FINALITY()), uint8(OpStackVerifierBase.Finality.PROPOSED));
+        assertEq(uint8(finalized.FINALITY()), uint8(OpStackBundleVerifierBase.Finality.FINALIZED));
+        assertEq(uint8(proposed.FINALITY()), uint8(OpStackBundleVerifierBase.Finality.PROPOSED));
     }
 
     // ── FINALIZED: accepted ──────────────────────────────────────────────────
@@ -354,14 +355,14 @@ contract OpStackVerifierTest is OpStackFixture {
     }
 
     function test_rejectsBadShapes() public {
-        vm.expectRevert(OpStackVerifierBase.InvalidTrustAnchor.selector);
+        vm.expectRevert(OpStackBundleVerifierBase.InvalidTrustAnchor.selector);
         finalized.verifyBundle(_bundle("", _case("game:finalized")), hex"00", ctx);
 
         bytes[] memory three = new bytes[](3);
         for (uint256 i = 0; i < 3; i++) {
             three[i] = RLP.encode(bytes(""));
         }
-        vm.expectRevert(OpStackVerifierBase.InvalidPayloadShape.selector);
+        vm.expectRevert(OpStackBundleVerifierBase.InvalidPayloadShape.selector);
         finalized.verifyBundle(RLP.encode(three), anchor, ctx);
 
         bytes[] memory items = new bytes[](6);
@@ -382,12 +383,12 @@ contract OpStackVerifierTest is OpStackFixture {
 
     function test_constructor_rejectsIncompleteProfile() public {
         OP.Profile memory p = _profile(asr, finalityDelay);
-        vm.expectRevert(OpStackVerifierBase.InvalidDeployment.selector);
+        vm.expectRevert(OpStackBundleVerifierBase.InvalidDeployment.selector);
         new OpStackVerifier(IEthL1StateVerifier(address(0)), 0, 12, p);
-        vm.expectRevert(OpStackVerifierBase.InvalidDeployment.selector);
+        vm.expectRevert(OpStackBundleVerifierBase.InvalidDeployment.selector);
         new OpStackVerifier(l1, 0, 0, p);
         p.gameImplementation = address(0);
-        vm.expectRevert(OpStackVerifierBase.InvalidDeployment.selector);
+        vm.expectRevert(OpStackBundleVerifierBase.InvalidDeployment.selector);
         new OpStackVerifier(l1, 0, 12, p);
     }
 
@@ -437,7 +438,7 @@ contract OpStackVerifierTest is OpStackFixture {
         OP.Profile memory p = _profile(asr, finalityDelay);
         p.rootFormat = OP.RootFormat.SUPER_ROOT_V1;
         p.l2ChainId = 0;
-        vm.expectRevert(OpStackVerifierBase.InvalidDeployment.selector);
+        vm.expectRevert(OpStackBundleVerifierBase.InvalidDeployment.selector);
         new OpStackVerifier(l1, 0, 12, p);
     }
 
