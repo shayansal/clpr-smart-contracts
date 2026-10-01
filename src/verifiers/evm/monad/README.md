@@ -123,9 +123,33 @@ built from public data today. What the live fixture (`test/e2e/fixtures/monad-li
 
 The finality chain (consensus headers P/B), the MIP-8 page proofs and the rotation chunks are covered by
 the 196-validator synthetic fixture (`test/verifiers/evm/monad/fixtures/synthetic`, built by
-`npm run monad:fixtures` with the same encodings), which the anvil spec also runs end to end. A relayer
-that runs its own Monad node (triedb access for proofs, the ledger for headers) can produce real
-bundles in exactly these formats.
+`npm run monad:fixtures` with the same encodings), which the anvil spec also runs end to end.
+
+### Sourcing live bundles (checked 2026-10-01)
+
+- **Storage proofs.** None of the 29 keyless Monad endpoints listed on chainlist (mainnet and testnet:
+  Monad Foundation, Alchemy, Ankr, dRPC, OnFinality, Tatum, Sentio, thirdweb, Huginn and others) serves
+  `eth_getProof`, and no Monad-specific proof method exists: `monad-rpc` @ `ac3ae48` implements none, and
+  the only proof-generation work upstream (category-labs/monad #986/#987, Oct 2024, slot-level and
+  pre-MIP-8) is unmerged. Running our own node therefore does not give proofs out of the box either: the
+  relayer needs a small proof tool on `category/mpt` that reads `/dev/triedb` and emits the account path
+  plus the MIP-8 page leaf in the `channelPages` format.
+- **State snapshots.** Category Labs publishes a keyless state snapshot (`d3b0ffqjb9bqrg.cloudfront.net/latest.txt`,
+  mainnet; about 8.2 GB, `monad-cli --dump-binary-snapshot` format). It holds account values and
+  slot-granular storage, not trie nodes, so proofs need the whole state trie (with page commitments)
+  rebuilt offline. That gives page proofs only at the snapshot block, which is useful for testing but
+  not for relaying.
+- **Consensus headers and QCs.** No RPC method serves them (`monadNewHeads` carries only the block id).
+  The forkpoint files give a QC and a root block id, not header preimages. The archiver uploads
+  `bft_block/<id>.header` to the archive buckets (`mainnet-deu-010-0`, `testnet-can-004-0-aavn9ll`),
+  but those are requester-pays and need AWS credentials, so their contents are unverified.
+- **Receipts.** The `receiptsRoot` of live mainnet and testnet blocks is the standard keccak MPT over
+  `debug_getRawReceipts` (checked on 6 blocks), so event inclusion proofs can be built from the public RPC.
+  The verifier does not use them today.
+- **Own node.** Requires x86-64 (AVX2, asmjit x86 JIT), Linux with io_uring (Ubuntu 24.04 packages),
+  16 cores at 4.5 GHz or more, 32 GB of RAM or more, a dedicated 2 TB NVMe for TrieDB plus 500 GB, and
+  bare metal. A Mac cannot run it. A full node's ledger (`ledger/headers/`) holds the consensus headers;
+  the QC on B is the `qc` of B's child.
 
 ## Chain family
 
