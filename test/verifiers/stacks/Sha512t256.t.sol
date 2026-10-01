@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test, console} from "forge-std/Test.sol";
 import {Sha512t256} from "../../../src/libraries/crypto/Sha512t256.sol";
 import {Sha256Midstate} from "../../../src/libraries/crypto/Sha256Midstate.sol";
+import {ClprSha512t256Hasher, Sha512t256Call} from "../../../src/libraries/crypto/ClprSha512t256Hasher.sol";
 
 contract Sha512t256Test is Test {
     function _rep(uint256 n) internal pure returns (bytes memory b) {
@@ -27,6 +28,33 @@ contract Sha512t256Test is Test {
             all = abi.encodePacked(all, Sha512t256.hash(_rep(n)));
         }
         assertEq(sha256(all), hex"5abdc16c4f1855c4e73dd611ee56737d9fd57102b111e3ef7df36153345d7591");
+    }
+
+    /// The bytecode hasher: the same 260-length vector, plus a 17 KB input (a Node256-sized MARF node).
+    function test_bytecodeHasher_allTailLengths() public {
+        address hasher = address(new ClprSha512t256Hasher());
+        bytes memory all;
+        for (uint256 n = 0; n < 260; ++n) {
+            all = abi.encodePacked(all, Sha512t256Call.hash(hasher, _rep(n)));
+        }
+        assertEq(sha256(all), hex"5abdc16c4f1855c4e73dd611ee56737d9fd57102b111e3ef7df36153345d7591");
+        bytes memory big = new bytes(16_900);
+        for (uint256 i = 0; i < big.length; ++i) {
+            big[i] = bytes1(uint8(i * 7 + 3));
+        }
+        assertEq(Sha512t256Call.hash(hasher, big), Sha512t256.hash(big));
+    }
+
+    function test_gas_bytecodeHasher() public {
+        address hasher = address(new ClprSha512t256Hasher());
+        bytes memory d1 = new bytes(1270);
+        uint256 g = gasleft();
+        Sha512t256Call.hash(hasher, "");
+        uint256 one = g - gasleft();
+        g = gasleft();
+        Sha512t256Call.hash(hasher, d1);
+        console.log("bytecode sha512/256: 1 block", one, "11 blocks", g - gasleft());
+        console.log("hasher runtime bytes", hasher.code.length);
     }
 
     /// Every SHA-256 tail length 0..129 (incl. the 55/56 boundary) against the precompile.
