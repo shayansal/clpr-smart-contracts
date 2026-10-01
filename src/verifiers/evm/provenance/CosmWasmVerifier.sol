@@ -310,8 +310,7 @@ contract CosmWasmVerifier is ClprEvmBundleVerifier {
         pure
         returns (bytes32 commitment)
     {
-        (bool exists, bytes memory value) =
-            _proveEntry(entry, storeRoot, bytes.concat(bytes1(CONTRACT_STORE_PREFIX), service, SERVICE_ITEM_KEY));
+        (bool exists, bytes memory value) = _proveEntry(entry, storeRoot, _serviceKey(service));
         if (!exists) revert EntryNotFound();
         uint256 n = service.length;
         if (value.length != n + 32) revert InvalidServiceEntry();
@@ -321,8 +320,14 @@ contract CosmWasmVerifier is ClprEvmBundleVerifier {
         commitment = Codec.load32(value, n);
     }
 
-    function _queueKey(bytes memory service, bytes32 channelId) internal pure returns (bytes memory) {
+    /// @dev Store key of the channel's queue record. Overridden by layouts other than wasmd's.
+    function _queueKey(bytes memory service, bytes32 channelId) internal pure virtual returns (bytes memory) {
         return bytes.concat(bytes1(CONTRACT_STORE_PREFIX), service, QUEUE_NAMESPACE, channelId);
+    }
+
+    /// @dev Store key of the service item (service address ‖ manifest commitment).
+    function _serviceKey(bytes memory service) internal pure virtual returns (bytes memory) {
+        return bytes.concat(bytes1(CONTRACT_STORE_PREFIX), service, SERVICE_ITEM_KEY);
     }
 
     /// @dev 90-byte record: version ‖ status ‖ next ‖ received ‖ manifest version ‖ sent hash ‖ received hash.
@@ -419,7 +424,7 @@ contract CosmWasmVerifier is ClprEvmBundleVerifier {
 
     /// @dev wasmd builds 32-byte contract addresses (`BuildContractAddressClassic`). Provenance
     ///      also still has early contracts with 20-byte addresses (e.g. code 33, checked live).
-    function _checkAddress(bytes memory a) internal pure {
+    function _checkAddress(bytes memory a) internal pure virtual {
         if (a.length != 20 && a.length != 32) revert InvalidServiceAddressLength();
     }
 }

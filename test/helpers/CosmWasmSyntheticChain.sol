@@ -82,9 +82,14 @@ abstract contract CosmWasmSyntheticChain is CometBftSyntheticChain {
         (fn_,, off) = PB.decodeFieldKey(b, 0);
     }
 
-    /// @dev Multistore proof for store `wasm` (single-store Tendermint tree: app_hash = leaf).
+    /// @dev Name of the IAVL store the synthetic multistore holds.
+    function _storeName() internal pure virtual returns (bytes memory) {
+        return bytes("wasm");
+    }
+
+    /// @dev Multistore proof for store `_storeName()` (single-store Tendermint tree: app_hash = leaf).
     function _multistore(bytes32 storeRoot) internal pure returns (bytes memory proof, bytes32 appHash) {
-        bytes memory k = bytes("wasm");
+        bytes memory k = _storeName();
         bytes memory v = abi.encodePacked(storeRoot);
         appHash = _leafHash(k, v);
         bytes memory leafOp = abi.encodePacked(
