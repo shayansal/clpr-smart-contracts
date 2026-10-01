@@ -9,6 +9,7 @@ import {StacksMarf} from "../../../src/libraries/proof/stacks/StacksMarf.sol";
 import {NakamotoHeader} from "../../../src/libraries/proof/stacks/NakamotoHeader.sol";
 import {ClarityCodec} from "../../../src/libraries/proof/stacks/ClarityCodec.sol";
 import {ClprTypes} from "../../../src/libraries/ClprTypes.sol";
+import {ClprProtobuf} from "../../../src/libraries/codec/ClprProtobuf.sol";
 
 /// @notice StacksVerifier on recorded Stacks mainnet data (test/e2e/fixtures/stacks-live/mainnet.json,
 ///         refresh with `npm run stacks-live:refresh`) and on synthetic CLPR queue records.
@@ -414,9 +415,41 @@ contract StacksVerifierTest is StacksTestBuilder {
         assertEq(service, SERVICE);
         assertEq(anchor, _anchor(s, 0));
         assertEq(anchorId, abi.encodePacked(_blockId(s.header)));
+    }
 
-        vm.expectRevert(StacksVerifier.ManifestProofUnsupported.selector);
-        s.verifier.verifyConfig(cfg, CHANNEL, hex"01");
+    /// Config-time manifest: the service's clpr-manifest-commitment data-var, mainnet-shaped proof.
+    function test_synthetic_verifyConfig_withManifest() public {
+        Synth memory s = _synth(9_000_000);
+        ClprTypes.ClprEndpointManifest memory m;
+        m.version = 2;
+        m.serviceAddress = SERVICE;
+        m.endpoints = new ClprTypes.Endpoint[](1);
+        m.endpoints[0] =
+            ClprTypes.Endpoint({ipAddress: "10.0.0.1", port: 50211, tlsCertificate: "", accountId: hex"01"});
+        bytes memory preimage = ClprProtobuf.encodeEndpointManifest(m);
+        bytes32 path = _h(bytes.concat("vm::", SERVICE, "::1::clpr-manifest-commitment"));
+        (bytes memory proof, bytes32 root) =
+            _marf(path, ClarityCodec.valueHash(hasher, ClarityCodec.buff32(keccak256(preimage))));
+        bytes memory header = _header(9_000_000, root);
+        ClprTypes.Throttles memory th;
+        bytes memory cfg = abi.encode(
+            StacksVerifier.ConfigProof({
+                signerSet: s.set,
+                block: StacksVerifier.SignedHeader({header: header, signatures: _sign(s.signers, _h(header), 0x0f)}),
+                servicePrincipal: SERVICE,
+                peerConfigNanos: 1,
+                throttles: th
+            })
+        );
+        bytes memory mp = abi.encode(
+            StacksVerifier.ConfigManifestProof({manifestPreimage: preimage, marfProof: proof, bindings: new bytes[](0)})
+        );
+        uint256 g = gasleft();
+        (,,,,,,, ClprTypes.ClprEndpointManifest memory got) = s.verifier.verifyConfig(cfg, CHANNEL, mp);
+        console.log("synthetic config + manifest: gas", g - gasleft(), "calldata", cfg.length + mp.length);
+        assertEq(got.version, 2);
+        assertEq(got.endpoints.length, 1);
+        assertEq(got.serviceAddress, SERVICE);
     }
 
     function test_synthetic_verifyConfig_rejects_badPrincipal() public {

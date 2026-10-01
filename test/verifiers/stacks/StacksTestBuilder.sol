@@ -81,8 +81,22 @@ abstract contract StacksTestBuilder is Test {
 
     // ── MARF proof (single segment, fresh write) ─────────────────────────────
 
-    /// @dev Proof of `path → valueHash` in a 4-level trie; returns the proof and the MARF root.
+    /// @dev Proof of `path → valueHash` in a 4-level trie shaped like mainnet's; returns the proof and the MARF root.
     function _marf(bytes32 path, bytes32 valueHash) internal view returns (bytes memory proof, bytes32 root) {
+        return _marfShaped(path, valueHash, false);
+    }
+
+    /// @dev The same with Node4 at every level (about 2 KB instead of 53 KB), for tests that only need a
+    ///      valid proof, such as the compliance suite's truncation sweep.
+    function _marfCompact(bytes32 path, bytes32 valueHash) internal view returns (bytes memory proof, bytes32 root) {
+        return _marfShaped(path, valueHash, true);
+    }
+
+    function _marfShaped(bytes32 path, bytes32 valueHash, bool compact)
+        internal
+        view
+        returns (bytes memory proof, bytes32 root)
+    {
         bytes memory leafPath = new bytes(28);
         for (uint256 i = 0; i < 28; ++i) {
             leafPath[i] = path[4 + i];
@@ -95,14 +109,16 @@ abstract contract StacksTestBuilder is Test {
         bytes memory n4;
         (n4, h) = _node(0, uint8(path[3]), 1, h, 3);
         proof = bytes.concat(proof, n4);
-        // Node256 at depths 2, 1, 0 (root); the child's type id is Node4 (2) then Node256 (5)
-        bytes memory n256;
-        (n256, h) = _node(3, uint8(path[2]), 2, h, 2);
-        proof = bytes.concat(proof, n256);
-        (n256, h) = _node(3, uint8(path[1]), 5, h, 1);
-        proof = bytes.concat(proof, n256);
-        (n256, h) = _node(3, uint8(path[0]), 5, h, 0);
-        proof = bytes.concat(proof, n256);
+        // Node256 (or Node4 when compact) at depths 2, 1, 0 (root); child type ids Node4 (2), then Node256 (5)
+        uint256 t = compact ? 0 : 3;
+        uint8 upper = compact ? 2 : 5;
+        bytes memory item;
+        (item, h) = _node(t, uint8(path[2]), 2, h, 2);
+        proof = bytes.concat(proof, item);
+        (item, h) = _node(t, uint8(path[1]), upper, h, 1);
+        proof = bytes.concat(proof, item);
+        (item, h) = _node(t, uint8(path[0]), upper, h, 0);
+        proof = bytes.concat(proof, item);
 
         bytes memory anc;
         for (uint256 i = 0; i < 24; ++i) {

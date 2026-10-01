@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {ClprEvmBundleVerifier} from "@hiero-ledger/clpr/verifiers/evm/common/ClprEvmBundleVerifier.sol";
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
+import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {ClarityCodec} from "@hiero-ledger/clpr/libraries/proof/stacks/ClarityCodec.sol";
 import {NakamotoHeader} from "@hiero-ledger/clpr/libraries/proof/stacks/NakamotoHeader.sol";
 import {StacksMarf} from "@hiero-ledger/clpr/libraries/proof/stacks/StacksMarf.sol";
@@ -75,6 +76,15 @@ contract StacksVerifier is ClprEvmBundleVerifier {
         ClprTypes.Throttles throttles;
     }
 
+    /// @notice `endpointManifestProofBytes` of {verifyConfig}: the manifest and the MARF proof of the
+    ///         service's `clpr-manifest-commitment` data-var (keccak256 of the preimage), at the
+    ///         config block.
+    struct ConfigManifestProof {
+        bytes manifestPreimage; // ClprEndpointManifest protobuf
+        bytes marfProof;
+        bytes[] bindings;
+    }
+
     /// @notice An uncompressed secp256k1 public key.
     struct PublicKey {
         bytes32 x;
@@ -105,7 +115,6 @@ contract StacksVerifier is ClprEvmBundleVerifier {
     error NextKeyHashMismatch(uint256 index);
     error StaleBlock(uint64 chainLength, uint64 lastChainLength);
     error BadServicePrincipal();
-    error ManifestProofUnsupported();
 
     // ── Configuration ────────────────────────────────────────────────────────
 
@@ -115,6 +124,8 @@ contract StacksVerifier is ClprEvmBundleVerifier {
     uint256 public constant MAX_HOPS = 64;
     /// @notice Map that holds the CLPR queue record in the service contract.
     bytes public constant QUEUE_MAP = "clpr-queue";
+    /// @notice Data-var that holds keccak256 of the service's endpoint manifest, a `(buff 32)`.
+    bytes public constant MANIFEST_VAR = "clpr-manifest-commitment";
 
     address public immutable HASHER;
     uint8 public immutable PRINCIPAL_VERSION; // p2pkh version byte of signer principals (22 mainnet, 26 testnet)
@@ -209,9 +220,6 @@ contract StacksVerifier is ClprEvmBundleVerifier {
             ClprTypes.ClprEndpointManifest memory endpointManifest
         )
     {
-        if (endpointManifestProofBytes.length != 0) {
-            revert ManifestProofUnsupported();
-        }
         ConfigProof memory c = abi.decode(configProofBytes, (ConfigProof));
         bytes32 sh = _resolveSet(GENESIS_SET_HASH, c.signerSet);
         NakamotoHeader.Header memory h = _verifySigned(c.signerSet, c.block);
@@ -227,7 +235,27 @@ contract StacksVerifier is ClprEvmBundleVerifier {
         // lastChainLength 0: the record may have been written before this block.
         initialTrustAnchor = abi.encode(Anchor({cycle: c.signerSet.cycle, signerSetHash: sh, lastChainLength: 0}));
         initialTrustAnchorId = abi.encodePacked(h.blockId);
-        endpointManifest = _uninitializedEndpointManifest(serviceAddress);
+        if (endpointManifestProofBytes.length == 0) {
+            endpointManifest = _uninitializedEndpointManifest(serviceAddress);
+        } else {
+            ConfigManifestProof memory m = abi.decode(endpointManifestProofBytes, (ConfigManifestProof));
+            endpointManifest = _verifyStacksManifest(h.stateIndexRoot, serviceAddress, m);
+        }
+    }
+
+    /// @dev Prove the service's manifest commitment (a `(buff 32)` data-var, Clarity key
+    ///      `vm::<service>::1::clpr-manifest-commitment`) and bind the preimage to it.
+    function _verifyStacksManifest(bytes32 stateRoot, bytes memory service, ConfigManifestProof memory m)
+        internal
+        view
+        returns (ClprTypes.ClprEndpointManifest memory manifest)
+    {
+        bytes32 path = _sha512t256(bytes.concat("vm::", service, "::1::", MANIFEST_VAR));
+        bytes32 value = ClarityCodec.valueHash(HASHER, ClarityCodec.buff32(keccak256(m.manifestPreimage)));
+        StacksMarf.verify(HASHER, m.marfProof, path, value, stateRoot, m.bindings);
+        manifest = ClprProtobuf.decodeEndpointManifest(m.manifestPreimage);
+        if (manifest.version == 0) revert ManifestVersionZero();
+        if (keccak256(manifest.serviceAddress) != keccak256(service)) revert ManifestServiceAddressMismatch();
     }
 
     // ── Signer-set rotation ──────────────────────────────────────────────────
