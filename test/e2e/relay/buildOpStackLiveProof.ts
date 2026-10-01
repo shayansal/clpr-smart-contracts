@@ -26,6 +26,7 @@ import {
     OP_SUCCINCT_LITE_LAYOUT,
     outputRootPreimage,
     PERMISSIONED_DISPUTE_GAME_V2_LAYOUT,
+    PORTAL2_KAILUA_LAYOUT,
     SUPER_FAULT_DISPUTE_GAME_LAYOUT,
     ROOT_FORMAT,
     superRootPreimage,
@@ -92,6 +93,10 @@ export interface OpStackLiveChain {
     rootFormat?: number;
     /// SUPER_ROOT_V1 chains: games claim an L2 timestamp, mapped to a block with this block time (s).
     l2BlockTimeSeconds?: bigint;
+    /// "portal": an OptimismPortal2 3.x with no AnchorStateRegistry is the registry itself
+    /// (`anchorStateRegistry` == `optimismPortal`): respected type, blacklist and finality delay live in the
+    /// portal, and there is no anchor root, so the capture's ANCHOR-mode case is a negative one.
+    registry?: "asr" | "portal";
     fixtureDir: string;
     channelId: Hex;
     beaconApis?: string[];
@@ -192,8 +197,20 @@ export const UNICHAIN = mainnetChain("unichain", {
     l2BlockTimeSeconds: 1n
 });
 
+/// MegaETH (chain 4326): KailuaGame (type 1337) registered by DGF 1.0.1 and respected by OptimismPortal2
+/// 3.15.2, which has no AnchorStateRegistry. The public RPCs do not serve eth_getProof ("not supported").
+export const MEGAETH = mainnetChain("megaeth", {
+    l2ChainId: 4326,
+    optimismPortal: "0x7f82f57F0Dd546519324392e408b01fcC7D709e8",
+    anchorStateRegistry: "0x7f82f57F0Dd546519324392e408b01fcC7D709e8",
+    l2Rpcs: ["https://mainnet.megaeth.com/rpc", "https://megaeth.drpc.org"],
+    l2LatestProofRpcs: [],
+    layout: PORTAL2_KAILUA_LAYOUT,
+    registry: "portal"
+});
+
 export const OPSTACK_LIVE_CHAINS: Record<string, OpStackLiveChain> = Object.fromEntries(
-    [BASE_SEPOLIA, XLAYER, RISE, RONIN, BOB, UNICHAIN].map((c) => [c.name, c]));
+    [BASE_SEPOLIA, XLAYER, RISE, RONIN, BOB, UNICHAIN, MEGAETH].map((c) => [c.name, c]));
 
 /// L2ToL1MessagePasser predeploy: a real contract with real code and storage on every OP Stack chain.
 export const L2_ACCOUNT: Hex = "0x4200000000000000000000000000000000000016";
@@ -228,6 +245,7 @@ const ABI = [
     {type: "function", name: "rootClaim", inputs: [], outputs: [{type: "bytes32"}], stateMutability: "view"},
     {type: "function", name: "extraData", inputs: [], outputs: [{type: "bytes"}], stateMutability: "view"},
     {type: "function", name: "l2SequenceNumber", inputs: [], outputs: [{type: "uint256"}], stateMutability: "view"},
+    {type: "function", name: "l2BlockNumber", inputs: [], outputs: [{type: "uint256"}], stateMutability: "view"},
     {type: "function", name: "getAnchorRoot", inputs: [], outputs: [{type: "bytes32"}, {type: "uint256"}], stateMutability: "view"}
 ] as const;
 
@@ -373,8 +391,13 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
     const pending = loadPending(chain);
 
     const {beacon, extra} = await captureBeaconLive({...opts, beaconApis}, async (execution, B) => {
-        const portalAsr = await call<Hex>(l1Rpc, chain.optimismPortal, "anchorStateRegistry", [], B);
-        if (portalAsr.toLowerCase() !== asr.toLowerCase()) throw new Error(`portal ASR moved to ${portalAsr}`);
+        const portalRegistry = chain.registry === "portal";
+        if (portalRegistry) {
+            if (asr.toLowerCase() !== chain.optimismPortal.toLowerCase()) throw new Error("portal registry: ASR != portal");
+        } else {
+            const portalAsr = await call<Hex>(l1Rpc, chain.optimismPortal, "anchorStateRegistry", [], B);
+            if (portalAsr.toLowerCase() !== asr.toLowerCase()) throw new Error(`portal ASR moved to ${portalAsr}`);
+        }
         const head = await rpc<EthGetProofResult>(l1Rpc, "eth_getProof", [asr, asrSlots(L), B]);
         const v = new Map(head.storageProof.map((sp) => [BigInt(sp.key), BigInt(sp.value)]));
         const dgf = slotHex(v.get(L.asrDisputeGameFactorySlot)!).replace(/^0x0{24}/, "0x") as Hex;
@@ -388,7 +411,9 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
                 call<number>(l1Rpc, address, "gameType", [], B),
                 call<Hex>(l1Rpc, address, "rootClaim", [], B),
                 call<Hex>(l1Rpc, address, "extraData", [], B),
+                // KailuaGame has no l2SequenceNumber (FaultDisputeGame < 1.4 neither): l2BlockNumber.
                 call<bigint>(l1Rpc, address, "l2SequenceNumber", [], B)
+                    .catch(() => call<bigint>(l1Rpc, address, "l2BlockNumber", [], B))
             ]);
             const proof = await rpc<EthGetProofResult>(l1Rpc, "eth_getProof", [address, gameSlots(L), B]);
             const code = await rpc<Hex>(l1Rpc, "eth_getCode", [address, B]);
@@ -420,7 +445,7 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
             if (Number((word >> (L.gameStatusOffset * 8n)) & 0xffn) === GAME_STATUS.DEFENDER_WINS) resolved = await readGame(addr);
         }
         const anchor = BigInt(anchorGame) === 0n ? null : await readGame(anchorGame);
-        const startingAnchor = anchor ? undefined : await call<[Hex, bigint]>(l1Rpc, asr, "getAnchorRoot", [], B)
+        const startingAnchor = anchor || portalRegistry ? undefined : await call<[Hex, bigint]>(l1Rpc, asr, "getAnchorRoot", [], B)
             .then(([root, seq]) => ({root, l2BlockNumber: seq.toString()}));
         if (startingAnchor && BigInt(startingAnchor.root) !== v.get(L.asrStartingAnchorRootSlot)) {
             throw new Error("getAnchorRoot() != startingAnchorRoot slot while no anchor game is set");
@@ -449,7 +474,8 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
             }
             top = lo;
         }
-        for (let i = top; !finalized && i >= 0n && i >= top - 200n; i--) {
+        // 400 games: MegaETH's games resolve 7 days after creation and are final 3.5 days later (~250 games).
+        for (let i = top; !finalized && i >= 0n && i >= top - 400n; i--) {
             const [type, , addr] = await call<[number, bigint, Hex]>(l1Rpc, dgf, "gameAtIndex", [i], B);
             if (type !== respectedGameType) continue;
             const word = BigInt(await rpc<Hex>(l1Rpc, "eth_getStorageAt", [addr, slotHex(L.gameStateSlot), B]));
@@ -549,7 +575,10 @@ export interface OpStackLiveProof {
     l2Account: Hex;
     l2CodeHash: Hex;
     respectedGameType: number;
+    /// ANCHOR mode on the anchor root; on a portal registry (no anchor root) the newest game's claim in
+    /// ANCHOR mode, which the verifiers must reject (`anchorRootExists` false).
     anchorMode: OpStackLiveGameCase;
+    anchorRootExists: boolean;
     /// The anchor game in GAME mode; null when the ASR has no anchor game (starting anchor root).
     anchorGame: OpStackLiveGameCase | null;
     /// The newest game final at the captured L1 block, when the capture found one.
@@ -733,7 +762,9 @@ export function buildOpStackLiveProof(c: OpStackLiveCapture): OpStackLiveProof {
         l2Account: L2_ACCOUNT,
         l2CodeHash,
         respectedGameType: c.l1.respectedGameType,
-        anchorMode: c.games.anchor ? gameCase(c.games.anchor, MODE.ANCHOR) : gameCase({
+        anchorRootExists: !!(c.games.anchor || c.games.startingAnchor),
+        anchorMode: c.games.anchor ? gameCase(c.games.anchor, MODE.ANCHOR) : !c.games.startingAnchor
+            ? gameCase(c.games.newest, MODE.ANCHOR) : gameCase({
             gameType: c.l1.respectedGameType, rootClaim: c.games.startingAnchor!.root, extraData: "0x",
             l2BlockNumber: c.games.startingAnchor!.l2BlockNumber, l2: c.games.startingAnchor!.l2
         }, MODE.ANCHOR),
@@ -773,6 +804,7 @@ export function forgeFixtureOf(p: OpStackLiveProof): unknown {
             respectedGameType: p.respectedGameType
         },
         anchorMode: c(p.anchorMode),
+        ...(p.anchorRootExists ? {} : {noAnchorRoot: true}),
         anchorGame: c(p.anchorGame),
         ...(p.finalized ? {finalized: c(p.finalized)} : {}),
         resolved: c(p.resolved),
@@ -792,7 +824,8 @@ function summarize(p: OpStackLiveProof): string {
         `ASR ${p.profile.anchorStateRegistry} impl codeHash ${p.profile.anchorStateRegistryImplCodeHash}`,
         `respected game type ${p.respectedGameType}, finality delay ${p.profile.disputeGameFinalityDelaySeconds}s, ` +
             `game impl ${p.profile.gameImplementation}`,
-        p.anchorGame ? `anchor  ${g(p.anchorGame)}` : `anchor  starting anchor root, L2 #${p.anchorMode.l2BlockNumber}`,
+        p.anchorGame ? `anchor  ${g(p.anchorGame)}` : p.anchorRootExists ? `anchor  starting anchor root, L2 #${p.anchorMode.l2BlockNumber}`
+            : "anchor  none (portal registry): ANCHOR mode is a negative case",
         ...(p.finalized ? [`final   ${g(p.finalized)}`] : []),
         `newest  ${g(p.newest)}`,
         ...(p.resolved ? [`resolved ${g(p.resolved)}`] : []),

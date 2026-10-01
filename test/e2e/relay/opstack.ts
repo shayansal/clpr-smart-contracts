@@ -74,6 +74,31 @@ export const PERMISSIONED_DISPUTE_GAME_V2_LAYOUT: OpStackLayout = {
     gameWasRespectedOffset: 0n
 };
 
+/// OptimismPortal2 3.x (before the AnchorStateRegistry) as the registry, DGF 1.0.1, KailuaGame (game type
+/// 1337: MegaETH). From the Sourcify layouts of MegaETH's portal implementation 0x5540…9fd9 (3.15.2), DGF
+/// implementation 0x4bba…e4a0 and game implementation 0x8c0E…0B84, cross-checked against live storage:
+/// the portal keeps disputeGameFactory (56), disputeGameBlacklist (58) and respectedGameType |
+/// respectedGameTypeUpdatedAt (59, offsets 0 and 4; the update time plays the retirement timestamp's role).
+/// The portal has no anchor root: both anchor slots point at slot 2, the first word of ResourceMetering's
+/// `__gap`, which is always zero, so ANCHOR mode always reverts (OutputRootNotAnchor). KailuaGame packs
+/// createdAt | resolvedAt | status | wasRespectedGameTypeWhenCreated in slot 10 (offsets 0, 8, 16, 17).
+export const PORTAL2_KAILUA_LAYOUT: OpStackLayout = {
+    asrDisputeGameFactorySlot: 56n,
+    asrAnchorGameSlot: 2n,
+    asrStartingAnchorRootSlot: 2n,
+    asrBlacklistSlot: 58n,
+    asrRespectedGameTypeSlot: 59n,
+    asrRespectedGameTypeOffset: 0n,
+    asrRetirementTimestampOffset: 4n,
+    dgfGamesSlot: 103n,
+    gameStateSlot: 10n,
+    gameCreatedAtOffset: 0n,
+    gameResolvedAtOffset: 8n,
+    gameStatusOffset: 16n,
+    gameWasRespectedSlot: 10n,
+    gameWasRespectedOffset: 17n
+};
+
 export const ZERO_HASH: Hex = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 /// `OpStackOutputRootProof.RootFormat`.
@@ -140,14 +165,15 @@ export function blacklistSlot(game: Hex, layout: OpStackLayout): Hex {
 /// ASR slots a dispute proof may need: always factory / respected type / implementation, plus the
 /// anchor game, the starting anchor root and (per game) the blacklist entry.
 export function asrSlots(layout: OpStackLayout, games: Hex[] = []): Hex[] {
-    return [
+    // Deduplicated: a portal-registry layout points both anchor slots at the same always-zero slot.
+    return [...new Set([
         slotHex(layout.asrDisputeGameFactorySlot),
         slotHex(layout.asrRespectedGameTypeSlot),
         EIP1967_IMPLEMENTATION_SLOT,
         slotHex(layout.asrAnchorGameSlot),
         slotHex(layout.asrStartingAnchorRootSlot),
         ...games.map((g) => blacklistSlot(g, layout))
-    ];
+    ])] as Hex[];
 }
 
 /// Pack a GameId: gameType(32) ‖ timestamp(64) ‖ proxy(160).

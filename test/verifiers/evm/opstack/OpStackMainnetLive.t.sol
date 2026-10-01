@@ -8,6 +8,7 @@ import {RiseProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/Ris
 import {RoninProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/RoninProfile.sol";
 import {BobProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/BobProfile.sol";
 import {UnichainProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/UnichainProfile.sol";
+import {MegaEthProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/MegaEthProfile.sol";
 import {EthL1StateVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/EthL1StateVerifier.sol";
 import {ClprBeaconSsz} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconSsz.sol";
 import {OpStackOutputRootProof as OP} from "@hiero-ledger/clpr/libraries/proof/opstack/OpStackOutputRootProof.sol";
@@ -109,8 +110,17 @@ abstract contract OpStackMainnetLiveBase is Test {
         assertEq(uint8(proposed.FINALITY()), 1);
     }
 
-    /// FINALIZED, ANCHOR mode: the ASR anchor root (anchor game, or starting anchor root).
-    function test_finalized_anchorMode() public view {
+    /// FINALIZED, ANCHOR mode: the ASR anchor root (anchor game, or starting anchor root). A portal registry
+    /// (no ASR) has no anchor root: the fixture's ANCHOR-mode case (the newest game's claim) must fail.
+    function test_finalized_anchorMode() public {
+        if (vm.keyExistsJson(json, ".noAnchorRoot")) {
+            bytes memory proof = _proof("anchorMode");
+            vm.expectPartialRevert(OP.OutputRootNotAnchor.selector);
+            finalized.verifyL2StateRoot(proof, anchor);
+            vm.expectPartialRevert(OP.OutputRootNotAnchor.selector);
+            proposed.verifyL2StateRoot(proof, anchor);
+            return;
+        }
         _verifyAndLog(finalized, "anchorMode", "FINALIZED ANCHOR");
     }
 
@@ -223,21 +233,22 @@ abstract contract OpStackMainnetLiveBase is Test {
         other.verifyL2StateRoot(_proof("newest"), anchor);
     }
 
-    /// A profile pinning another ASR implementation code hash rejects every proof.
+    /// A profile pinning another ASR (or portal-registry) implementation code hash rejects every proof,
+    /// here the newest game that PROPOSED otherwise accepts.
     function test_rejectsOtherAsrImplementation() public {
         OP.Profile memory p = _profile();
         p.anchorStateRegistryImplCodeHash = keccak256("other");
-        OpStackVerifier other = new OpStackVerifier(l1, genesisTime, 12, p);
-        vm.expectRevert();
-        other.verifyL2StateRoot(_proof("anchorMode"), anchor);
+        OpStackProposedVerifier other = new OpStackProposedVerifier(l1, genesisTime, 12, p);
+        vm.expectPartialRevert(OP.AnchorStateRegistryImplMismatch.selector);
+        other.verifyL2StateRoot(_proof("newest"), anchor);
     }
 
-    /// The real signature no longer verifies under another fork version.
+    /// The real signature no longer verifies under another fork version (on a proof PROPOSED accepts).
     function test_rejectsTamperedSignature() public {
         bytes memory bad = bytes.concat(anchor);
         bad[32] = 0x05; // Electra fork version
         vm.expectRevert();
-        finalized.verifyL2StateRoot(_proof("anchorMode"), bad);
+        proposed.verifyL2StateRoot(_proof("newest"), bad);
     }
 }
 
@@ -294,5 +305,19 @@ contract OpStackUnichainLiveTest is OpStackMainnetLiveBase {
 
     function _gameType() internal pure override returns (uint32) {
         return UnichainProfile.GAME_TYPE;
+    }
+}
+
+contract OpStackMegaEthLiveTest is OpStackMainnetLiveBase {
+    function _fixtureName() internal pure override returns (string memory) {
+        return "megaeth";
+    }
+
+    function _profile() internal pure override returns (OP.Profile memory) {
+        return MegaEthProfile.profile();
+    }
+
+    function _gameType() internal pure override returns (uint32) {
+        return MegaEthProfile.GAME_TYPE;
     }
 }
