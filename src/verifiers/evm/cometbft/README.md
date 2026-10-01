@@ -1,6 +1,8 @@
 # CometBFT verifier family
 
 > **Source**: [CometBftVerifier.sol](./CometBftVerifier.sol) ·
+> light client [CometBftLightClient.sol](./CometBftLightClient.sol) (shared) ·
+> multi-transaction commits [CometBftCommitAccumulator.sol](./CometBftCommitAccumulator.sol) ·
 > shared libraries [CometBftLib](../../../libraries/proof/cometbft/CometBftLib.sol),
 > [CometBftProofCodec](../../../libraries/proof/cometbft/CometBftProofCodec.sol),
 > [Ics23Lib](../../../libraries/proof/cometbft/Ics23Lib.sol) ·
@@ -29,8 +31,8 @@ Every row below comes from that chain's live public RPC on 2026-10-01. The fixtu
 | Sei | CometBFT (sei-tendermint) | Ed25519 | — | — | EVM in IAVL store `evm`, key `0x03‖addr‖slot` | Covered by profile (`0x03`); production path is `SeiCometBftVerifier` |
 | **Polygon PoS** (Heimdall v2) | CometBFT 0.38.22, Polygon fork | **secp256k1eth**: 65 B key, r‖s‖v over keccak256 | 104 | **10** | Heimdall app state is not EVM. Bor (EVM, MPT) block hashes are in the `milestone` store, key `0x81‖count` | **Light client covered** (live commit 1.54M gas). Milestone → Bor header → MPT adapter not built (§7) |
 | **dYdX v4** | CometBFT 0.38.5 | Ed25519 | 21 | 10 | Native Cosmos modules only. No `wasm` store, no EVM (checked: `no such store: wasm`) | Light client fits (6.75M). No place for a CLPR Service contract |
-| **Provenance** | CometBFT 0.38.22 | Ed25519 | 100 | 18 | CosmWasm: `wasm` store, key `0x03‖contract(32 B)‖key` | Light client fits alone (12.6M). Needs a CosmWasm profile (§7); with a state proof it is ~15–16M |
-| **THORChain** | CometBFT 0.38.19 | Ed25519 | 99 (all power 100) | **67** | CosmWasm `wasm` store (App Layer) | **Does not fit**: commit alone is 43.6M gas (§6) |
+| **Provenance** | CometBFT 0.38.22 | Ed25519 | 100 | 18 | CosmWasm: `wasm` store, key `0x03‖contract(32 B)‖key` | **Covered** by `CosmWasmVerifier` ([../provenance](../provenance/README.md)). Live full bundle in one tx 13.12M; split mode 0.52M + `accumulate` txs |
+| **THORChain** | CometBFT 0.38.19 | Ed25519 | 99 (all power 100) | **67** | CosmWasm `wasm` store (App Layer) | Commit alone is 43.6M gas in one tx. **Fits split**: `CometBftCommitAccumulator` over 4 txs (11.1–11.9M each, live), then `CosmWasmVerifier` by header hash |
 | **Arc** (Circle) | **Malachite** (Tendermint algorithm, not CometBFT) | Ed25519 over **SSZ** votes | 22 (testnet) | 11 | EVM (reth), **MPT**. Validator set is EVM storage of `ValidatorRegistry` at `0x3600…0002` | Live certificate checked off-chain. Different wire format, so a separate adapter (§7) |
 
 "Min. signers" uses the live validator set sorted by power. The relay sends exactly that many
@@ -166,7 +168,7 @@ The ICS-23 proofs are the `ics23:iavl` and `ics23:simple` ops that `abci_query
   rotation-only bundle counts as progress (Condition 2), so §6.3 works with ClprService unchanged.
 - **Bundle size throttle.** A bundle is ~16–19 KB, so the receiving ClprService needs
   `maxSyncBytes` at or above that (BundleLib Step 2).
-- **Size.** 24,152 B, which is 424 B under EIP-170.
+- **Size.** 24,126 B, which is 450 B under EIP-170.
 
 ## 6. Gas on Hedera terms
 
@@ -225,7 +227,7 @@ Cronos node served about 500k blocks of history.
 | Option | How | Cost on Hedera | Trust | Notes |
 |---|---|---|---|---|
 | **a. Voting-power ordering** (implemented) | Send only the smallest power-ordered subset (§3.4) | — | unchanged | Solves Provenance (99 → 18) and dYdX. Useless for equal power (THORChain 67, Mezo 15) |
-| **b. Signature accumulator across transactions** | A companion contract verifies `k` signatures per tx for `(headerHash, setHash)` and records signed power plus a used-signer bitmap. The bundle then checks `accumulated > 2/3` | THORChain: 67 sigs ≈ 4 tx × ~17 sigs ≈ 11M each, plus ~25k SSTORE per tx | unchanged | Needs per-channel state outside the stateless verifier, and verifyBundle must read it. ~45M gas per THORChain header in total |
+| **b. Signature accumulator across transactions** (implemented: `CometBftCommitAccumulator`, used by `CosmWasmVerifier`) | Anyone verifies any subset of a header's signatures per tx; the contract records signed power and a used-signer bitmap per header hash. A bundle references a header with >2/3 accumulated | THORChain live: 4 txs, 11.1–11.9M each, 46.6M total | unchanged | The verifier reads accumulator state (`view`). See [../provenance/README.md §3](../provenance/README.md) |
 | **c. SNARK of the commit** | Off-chain prover shows "signers of power > 2/3 of the set with hash S signed header hash h" (Ed25519 inside the circuit). On-chain, verify a Groth16 proof with BN254 precompiles (0x06–0x08, available on Hedera) | ~0.3–0.4M gas per proof, independent of set size | adds circuit/prover soundness. A trusted setup for Groth16 | Ed25519 is costly in-circuit (non-native field arithmetic), so proving cost and latency move off-chain. The best option for THORChain |
 | d. Cheaper Ed25519 in Solidity | Optimise field arithmetic or SHA-512 | unmeasured | unchanged | At most a constant factor; 67 signatures stay far above 15M |
 | e. Ed25519 precompile on Hedera | A HIP for EIP-665 or RIP-7696-style precompiles | EIP-665 proposed 2,000 gas per signature | unchanged | Would make every Ed25519 chain trivial. Not available today |
@@ -246,9 +248,9 @@ Cronos node served about 500k blocks of history.
   checks all signatures off-chain against the registry at `H-1`. An adapter needs a set-hash
   anchor, SSZ sign bytes, then RLP header → MPT. Testnet needs 11 signatures ≈ 7M gas plus MPT, so
   it fits.
-- **CosmWasm chains** (Provenance, THORChain). These need a CosmWasm CLPR Service and a profile
-  for the `wasm` store with 32-byte contract addresses (`0x03‖contract(32)‖key`). The storage
-  layout would be the CosmWasm contract's own, not ClprService's Solidity slots.
+- **CosmWasm chains** (Provenance, THORChain): covered by `CosmWasmVerifier`
+  ([../provenance](../provenance/README.md)), which fixes the CosmWasm CLPR Service's queue-record
+  layout and sketches the service. No CosmWasm CLPR Service is deployed yet.
 - **dYdX.** No contract runtime, so a CLPR Service would have to be a native module. The light
   client is ready.
 - **Sei** can move to this contract with a `0x03` profile once its relay emits the compact anchor.
