@@ -16,6 +16,8 @@
  *   table-entry proof at H−1  `0x21 ‖ handle ‖ 0x03 ‖ BCS(PairKey)` for the first entry of that
  *                             table: a real Move table entry, the same shape as `channels[channelId]`.
  * The state at H−1 is committed in header H's app_hash (ABCI query semantics).
+ *   rotation rate             validator-set changes (validators_hash ≠ next_validators_hash) in the
+ *                             4,000 headers below H (/blockchain), for the rotation-cost estimate.
  * No CLPR Service is deployed on Initia, so these real Move items stand in for the CLPR ones; the
  * on-chain key derivation (InitiaMoveVerifier.resourceKey / tableEntryKey) is checked against them.
  */
@@ -55,6 +57,25 @@ export function tableEntryKey(handle: Buffer, bcsKey: Buffer): Buffer {
     return Buffer.concat([Buffer.from([0x21]), handle, Buffer.from([0x03]), bcsKey]);
 }
 
+/** Validator-set changes among the `window` headers below `H`, with the time span they cover. */
+async function rotationRate(H: bigint, window = 4000n): Promise<{blocks: number; changes: number; from: string; to: string}> {
+    let changes = 0;
+    let blocks = 0;
+    let from = "";
+    let to = "";
+    for (let hi = H - 1n; hi > H - 1n - window; hi -= 20n) {
+        const r = await fetch(`${RPC}/blockchain?minHeight=${hi - 19n}&maxHeight=${hi}`, {signal: AbortSignal.timeout(30_000)});
+        const metas = ((await r.json()) as any).result.block_metas as any[];
+        for (const m of metas) {
+            blocks++;
+            if (m.header.validators_hash !== m.header.next_validators_hash) changes++;
+            if (!to) to = m.header.time;
+            from = m.header.time;
+        }
+    }
+    return {blocks, changes, from, to};
+}
+
 async function restJson(p: string): Promise<any> {
     const r = await fetch(REST + p, {signal: AbortSignal.timeout(30_000)});
     if (!r.ok) throw new Error(`${p}: ${r.status}`);
@@ -78,6 +99,7 @@ export async function capture() {
     const ent = await fetchAbciProof(RPC, MOVE_STORE, entKey, H - 1n);
     if (ent.proof.value.length === 0) throw new Error("table entry missing");
 
+    const rotations = await rotationRate(H);
     const h = commit.sh.header;
     return {
         chain: "initia",
@@ -99,7 +121,8 @@ export async function capture() {
             tableHandle: "0x" + handle.toString("hex"),
             resourceKey: "0x" + resKey.toString("hex"),
             tableKeyBytes: "0x" + keyBytes.toString("hex"),
-            tableEntryKey: "0x" + entKey.toString("hex")
+            tableEntryKey: "0x" + entKey.toString("hex"),
+            rotations
         },
         raw: {commit: commit.json, validators: vals.json, resource: res.json, entry: ent.json}
     };
