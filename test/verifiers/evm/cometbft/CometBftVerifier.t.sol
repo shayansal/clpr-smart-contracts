@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {CometBftVerifier} from "@hiero-ledger/clpr/verifiers/evm/cometbft/CometBftVerifier.sol";
+import {CometBftLightClient} from "@hiero-ledger/clpr/verifiers/evm/cometbft/CometBftLightClient.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobufHelpers as PB} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 import {Ics23Lib} from "@hiero-ledger/clpr/libraries/proof/cometbft/Ics23Lib.sol";
@@ -33,10 +34,10 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         setB.push(_secpVal("b2", 25));
         hashA = _setHash(setA);
         hashB = _setHash(setB);
-        verifier = new CometBftVerifier(_profile(CometBftVerifier.KeyScheme.SECP256K1_ETH, address(0), hashA));
+        verifier = new CometBftVerifier(_profile(CometBftLightClient.KeyScheme.SECP256K1_ETH, address(0), hashA));
     }
 
-    function _profile(CometBftVerifier.KeyScheme scheme, address ed, bytes32 bootstrap)
+    function _profile(CometBftLightClient.KeyScheme scheme, address ed, bytes32 bootstrap)
         internal
         pure
         returns (CometBftVerifier.Profile memory)
@@ -219,7 +220,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         o[0] = sig;
         proof = _signedBundle(120, setA, _idx(0, 1), hashA, o);
         assertTrue(keccak256(proof) != keccak256(good));
-        vm.expectRevert(CometBftVerifier.InvalidSignature.selector);
+        vm.expectRevert(CometBftLightClient.InvalidSignature.selector);
         _call(proof);
     }
 
@@ -229,7 +230,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         bytes[] memory o = new bytes[](1);
         o[0] = _sign(setA[2], _signBytes(blk, blk.header.timeSeconds + 1)); // a2 signs, slot claims a0
         bytes memory r1 = _signedBundle(120, setA, _idx(0, 1), hashA, o);
-        vm.expectRevert(CometBftVerifier.InvalidSignature.selector);
+        vm.expectRevert(CometBftLightClient.InvalidSignature.selector);
         _call(r1);
     }
 
@@ -239,7 +240,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         bytes[] memory o = new bytes[](1);
         o[0] = _sign(setA[0], _signBytes(other, other.header.timeSeconds + 1));
         bytes memory r2 = _signedBundle(120, setA, _idx(0, 1), hashA, o);
-        vm.expectRevert(CometBftVerifier.InvalidSignature.selector);
+        vm.expectRevert(CometBftLightClient.InvalidSignature.selector);
         _call(r2);
     }
 
@@ -252,14 +253,14 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         bytes[] memory o = new bytes[](1);
         o[0] = abi.encodePacked(r, bytes32(n - uint256(s)), v == 27 ? uint8(1) : uint8(0)); // malleated twin
         bytes memory r3 = _signedBundle(120, setA, _idx(0, 1), hashA, o);
-        vm.expectRevert(CometBftVerifier.InvalidSignature.selector);
+        vm.expectRevert(CometBftLightClient.InvalidSignature.selector);
         _call(r3);
     }
 
     function test_revert_belowThreshold() public {
         // 40 + 20 = 60 of 100: not > 2/3.
         bytes memory r4 = _signedBundle(120, setA, _idx(0, 2), hashA, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.QuorumNotMet.selector);
+        vm.expectRevert(CometBftLightClient.QuorumNotMet.selector);
         _call(r4);
     }
 
@@ -273,7 +274,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         s[2] = _secpVal("t2", 1);
         bytes32 h = _setHash(s);
         bytes memory proof = _signedBundle(120, s, _idx(0, 1), h, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.QuorumNotMet.selector);
+        vm.expectRevert(CometBftLightClient.QuorumNotMet.selector);
         verifier.verifyBundle(proof, _anchor(h, ANCHOR_HEIGHT), _ctx());
     }
 
@@ -288,17 +289,17 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         uint256 at = _find(sh, needle);
         sh[at + 2] = 0xe0;
         proof = _payload(_stateProof(sh, b.multistore, b.entries), setA, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.TooFewSignatures.selector);
+        vm.expectRevert(CometBftLightClient.TooFewSignatures.selector);
         _call(proof);
 
         sh[at + 2] = 0x80;
         proof = _payload(_stateProof(sh, b.multistore, b.entries), setA, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.ExtraSignatures.selector);
+        vm.expectRevert(CometBftLightClient.ExtraSignatures.selector);
         _call(proof);
 
         sh[at + 2] = 0xc1; // padding bit beyond the 4 validators
         proof = _payload(_stateProof(sh, b.multistore, b.entries), setA, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.SignersBitOutOfRange.selector);
+        vm.expectRevert(CometBftLightClient.SignersBitOutOfRange.selector);
         _call(proof);
     }
 
@@ -307,7 +308,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
     function test_revert_wrongValidatorSet() public {
         // A bundle validly signed by B, presented against an anchor that trusts A.
         bytes memory proof = _signedBundle(120, setB, _idx(0, 1), hashB, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.ValidatorSetHashMismatch.selector);
+        vm.expectRevert(CometBftLightClient.ValidatorSetHashMismatch.selector);
         _call(proof);
     }
 
@@ -322,20 +323,20 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         b.blk.header.validatorsHash = hashA;
         bytes memory proof =
             _payload(_stateProof(_signedHeader(b.blk, setA, _idx(0)), b.multistore, b.entries), forged, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.ValidatorSetHashMismatch.selector);
+        vm.expectRevert(CometBftLightClient.ValidatorSetHashMismatch.selector);
         _call(proof);
     }
 
     function test_revert_staleSetAfterRotation() public {
         // After rotating to B (anchor = B@151), a bundle still signed by A is rejected.
         bytes memory proof = _signedBundle(160, setA, _idx(0, 1), hashA, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.ValidatorSetHashMismatch.selector);
+        vm.expectRevert(CometBftLightClient.ValidatorSetHashMismatch.selector);
         verifier.verifyBundle(proof, _anchor(hashB, 151), _ctx());
     }
 
     function test_revert_staleHeight() public {
         bytes memory proof = _signedBundle(99, setA, _idx(0, 1), hashA, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.HeightTooOld.selector);
+        vm.expectRevert(CometBftLightClient.HeightTooOld.selector);
         _call(proof);
     }
 
@@ -348,7 +349,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         b.blk.header.validatorsHash = hashB;
         bytes memory proof =
             _payload(_stateProof(_signedHeader(b.blk, setB, _idx(0, 1)), b.multistore, b.entries), setB, hops);
-        vm.expectRevert(CometBftVerifier.HeightTooOld.selector);
+        vm.expectRevert(CometBftLightClient.HeightTooOld.selector);
         _call(proof);
     }
 
@@ -360,7 +361,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         b.blk.header.validatorsHash = hashB;
         bytes memory proof =
             _payload(_stateProof(_signedHeader(b.blk, setB, _idx(0, 1)), b.multistore, b.entries), setB, hops);
-        vm.expectRevert(CometBftVerifier.HeightTooOld.selector);
+        vm.expectRevert(CometBftLightClient.HeightTooOld.selector);
         _call(proof);
     }
 
@@ -371,7 +372,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         bytes memory proof = _payload(
             _stateProof(_signedHeader(b.blk, setA, _idx(0, 1)), b.multistore, b.entries), setA, new bytes[](0)
         );
-        vm.expectRevert(CometBftVerifier.ChainIdMismatch.selector);
+        vm.expectRevert(CometBftLightClient.ChainIdMismatch.selector);
         _call(proof);
     }
 
@@ -393,7 +394,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
         b.blk.header.validatorsHash = hashA;
         bytes memory proof =
             _payload(_stateProof(_signedHeader(b.blk, setA, _idx(0, 1)), b.multistore, b.entries), s, new bytes[](0));
-        vm.expectRevert(CometBftVerifier.InvalidValidatorLeaf.selector);
+        vm.expectRevert(CometBftLightClient.InvalidValidatorLeaf.selector);
         _call(proof);
     }
 
@@ -547,7 +548,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
     function test_revert_verifyConfig_selfSuppliedValidatorSet() public {
         // A config proof whose own validator set (B) signs everything is NOT trusted: bootstrap is A.
         bytes memory r10 = _configProof(setB, 25, _serviceSlotValue(), new bytes[](0), 110);
-        vm.expectRevert(CometBftVerifier.ValidatorSetHashMismatch.selector);
+        vm.expectRevert(CometBftLightClient.ValidatorSetHashMismatch.selector);
         verifier.verifyConfig(r10, CHANNEL, "");
     }
 
@@ -562,7 +563,7 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
 
     function test_revert_verifyConfig_beforeBootstrapHeight() public {
         bytes memory r13 = _configProof(setA, 25, _serviceSlotValue(), new bytes[](0), 99);
-        vm.expectRevert(CometBftVerifier.HeightTooOld.selector);
+        vm.expectRevert(CometBftLightClient.HeightTooOld.selector);
         verifier.verifyConfig(r13, CHANNEL, "");
     }
 
@@ -575,10 +576,10 @@ contract CometBftVerifierTest is CometBftSyntheticChain {
 
     function test_revert_invalidProfile() public {
         vm.expectRevert(CometBftVerifier.InvalidProfile.selector);
-        new CometBftVerifier(_profile(CometBftVerifier.KeyScheme.ED25519, address(0), hashA));
+        new CometBftVerifier(_profile(CometBftLightClient.KeyScheme.ED25519, address(0), hashA));
         vm.expectRevert(CometBftVerifier.InvalidProfile.selector);
-        new CometBftVerifier(_profile(CometBftVerifier.KeyScheme.SECP256K1_ETH, address(0), bytes32(0)));
-        CometBftVerifier.Profile memory p = _profile(CometBftVerifier.KeyScheme.SECP256K1_ETH, address(0), hashA);
+        new CometBftVerifier(_profile(CometBftLightClient.KeyScheme.SECP256K1_ETH, address(0), bytes32(0)));
+        CometBftVerifier.Profile memory p = _profile(CometBftLightClient.KeyScheme.SECP256K1_ETH, address(0), hashA);
         p.chainId = "";
         vm.expectRevert(CometBftVerifier.InvalidProfile.selector);
         new CometBftVerifier(p);
