@@ -6,9 +6,11 @@ import {OpStackVerifier} from "@hiero-ledger/clpr/verifiers/evm/opstack/OpStackV
 import {OpStackProposedVerifier} from "@hiero-ledger/clpr/verifiers/evm/opstack/OpStackProposedVerifier.sol";
 import {RiseProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/RiseProfile.sol";
 import {RoninProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/RoninProfile.sol";
+import {BobProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/BobProfile.sol";
 import {EthL1StateVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/EthL1StateVerifier.sol";
 import {ClprBeaconSsz} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconSsz.sol";
 import {OpStackOutputRootProof as OP} from "@hiero-ledger/clpr/libraries/proof/opstack/OpStackOutputRootProof.sol";
+import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 
 /// @notice A deployment profile against REAL Ethereum-mainnet data: the mainnet sync committee's signature,
 ///         the chain's AnchorStateRegistry / DisputeGameFactory / dispute games at the attested L1 block, and
@@ -107,7 +109,7 @@ abstract contract OpStackMainnetLiveBase is Test {
     }
 
     /// FINALIZED, ANCHOR mode: the ASR anchor root (anchor game, or starting anchor root).
-    function test_finalized_anchorMode() public {
+    function test_finalized_anchorMode() public view {
         _verifyAndLog(finalized, "anchorMode", "FINALIZED ANCHOR");
     }
 
@@ -160,6 +162,43 @@ abstract contract OpStackMainnetLiveBase is Test {
         assertEq(root, _root("newest"));
         (uint256 intrinsic, uint256 size) = _intrinsicGas(p);
         console.log(string.concat(_fixtureName(), " PROPOSED newest: gas ~"), intrinsic + g, "calldata B", size);
+    }
+
+    /// Full `verifyBundle` down to the L2 storage proofs (ClprService stand-in: the L2ToL1MessagePasser,
+    /// channel slots absent), on the newest game when the L2 RPC served its proof: PROPOSED only.
+    function test_proposed_fullBundle() public {
+        bytes memory bundle = vm.parseJsonBytes(json, ".proposedBundle");
+        vm.skip(bundle.length == 0); // the public L2 RPC served no eth_getProof at the game's block
+        bytes memory ctx = vm.parseJsonBytes(json, ".channelContext");
+        uint256 g = gasleft();
+        (ClprTypes.QueueMetadata memory m,,,,) = proposed.verifyBundle(bundle, anchor, ctx);
+        g -= gasleft();
+        assertEq(m.nextMessageId, 0);
+        _logBundleGas("PROPOSED verifyBundle", bundle, ctx, g);
+    }
+
+    /// Full `verifyBundle` through FINALIZED, on a game final at the proven L1 time.
+    function test_finalized_fullBundle() public {
+        bytes memory bundle = vm.parseJsonBytes(json, ".finalizedBundle");
+        vm.skip(bundle.length == 0); // no final game whose L2 proof the public RPC still serves
+        bytes memory ctx = vm.parseJsonBytes(json, ".channelContext");
+        uint256 g = gasleft();
+        (ClprTypes.QueueMetadata memory m,,,,) = finalized.verifyBundle(bundle, anchor, ctx);
+        g -= gasleft();
+        assertEq(m.nextMessageId, 0);
+        _logBundleGas("FINALIZED verifyBundle", bundle, ctx, g);
+    }
+
+    function _logBundleGas(string memory label, bytes memory bundle, bytes memory ctx, uint256 execution)
+        internal
+        view
+    {
+        bytes memory data = abi.encodeCall(finalized.verifyBundle, (bundle, anchor, ctx));
+        uint256 gas = 21_000 + execution;
+        for (uint256 i; i < data.length; ++i) {
+            gas += data[i] == 0 ? 4 : 16;
+        }
+        console.log(string.concat(_fixtureName(), " ", label, ": gas ~"), gas, "calldata B", data.length);
     }
 
     /// A profile pinning other game args (DGF 1.6: another prestate, proposer or challenger; DGF < 1.6: any
@@ -226,5 +265,19 @@ contract OpStackRoninLiveTest is OpStackMainnetLiveBase {
 
     function _gameType() internal pure override returns (uint32) {
         return RoninProfile.GAME_TYPE;
+    }
+}
+
+contract OpStackBobLiveTest is OpStackMainnetLiveBase {
+    function _fixtureName() internal pure override returns (string memory) {
+        return "bob";
+    }
+
+    function _profile() internal pure override returns (OP.Profile memory) {
+        return BobProfile.profile();
+    }
+
+    function _gameType() internal pure override returns (uint32) {
+        return BobProfile.GAME_TYPE;
     }
 }

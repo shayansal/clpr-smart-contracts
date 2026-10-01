@@ -167,8 +167,19 @@ export const RONIN = mainnetChain("ronin", {
     layout: PERMISSIONED_DISPUTE_GAME_V2_LAYOUT
 });
 
+/// BOB (chain 60808): PermissionedDisputeGame 2.4.0 (type 1), ASR 3.9.0 (12 h delay) / DGF 1.6.1 with game
+/// args. rpc.gobob.xyz serves eth_getProof days back, so FINALIZED games carry full bundles.
+export const BOB = mainnetChain("bob", {
+    l2ChainId: 60808,
+    optimismPortal: "0x8AdeE124447435fE03e3CD24dF3f4cAE32E65a3E",
+    anchorStateRegistry: "0xC9AC21AcD8696B64270716528bF83630Ea7a293c",
+    l2Rpcs: ["https://rpc.gobob.xyz"],
+    l2LatestProofRpcs: [],
+    layout: PERMISSIONED_DISPUTE_GAME_V2_LAYOUT
+});
+
 export const OPSTACK_LIVE_CHAINS: Record<string, OpStackLiveChain> = Object.fromEntries(
-    [BASE_SEPOLIA, XLAYER, RISE, RONIN].map((c) => [c.name, c]));
+    [BASE_SEPOLIA, XLAYER, RISE, RONIN, BOB].map((c) => [c.name, c]));
 
 /// L2ToL1MessagePasser predeploy: a real contract with real code and storage on every OP Stack chain.
 export const L2_ACCOUNT: Hex = "0x4200000000000000000000000000000000000016";
