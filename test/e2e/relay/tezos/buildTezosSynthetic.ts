@@ -181,6 +181,12 @@ function build() {
     const anchorTree = toTree(anchorDir);
     const [, anchorRoot] = treeHash(anchorTree);
 
+    // An anchor state that schedules "all bakers attest" (the verifier must refuse it).
+    const abaaTree = toTree({
+        data: {all_bakers_attest_first_level: Buffer.from("00000fa0", "hex"), cycle: {"5": cycleDir(sampler, seed)}},
+    });
+    const [, abaaRoot] = treeHash(abaaTree);
+
     // A different validator set under another anchor (same cycle).
     const alt = delegates("-alt");
     const altSampler = encodeSampler(alt);
@@ -398,6 +404,8 @@ function build() {
         owners,
         finality: fin(),
         finalityAltSet: fin({tree: altTree}),
+        finalityAbaa: fin({tree: abaaTree}),
+        abaaAnchor: anchorEnc(ANCHOR_LEVEL, abaaRoot),
         finalityBadSig: fin({atts: [badSig, a1, a2]}),
         finalityWeak: fin({atts: [a1], aggs: [aggregate([4], sign(d4.sk))]}),
         finalityCached: fin({atts: [{...a0, signature: "0x"}, a1, {...a2, signature: "0x"}]}),

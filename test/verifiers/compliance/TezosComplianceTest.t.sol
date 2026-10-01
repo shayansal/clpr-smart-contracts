@@ -9,6 +9,7 @@ import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol"
 import {TezosBlake2b} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosBlake2b.sol";
 import {TezosLightClient} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosLightClient.sol";
 import {TezosSignatureCache} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosSignatureCache.sol";
+import {TezosContextVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosContextVerifier.sol";
 import {TezosVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosVerifier.sol";
 import {Ed25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/Ed25519Verifier.sol";
 
@@ -18,7 +19,9 @@ import {Ed25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/Ed25519Verif
 ///      TezosVerifier.t.sol (synthetic chain) and TezosLive.t.sol (mainnet data).
 contract TezosVerifierFinalityStub is TezosVerifier {
     constructor(Profile memory p, IEd25519Verifier ed, TezosSignatureCache c, bytes memory service)
-        TezosVerifier(p, ed, c, "tezos:NetXdQprcVkpaWU", service, 7, 1000, bytes32(uint256(1)))
+        TezosVerifier(
+            p, ed, c, new TezosContextVerifier(), "tezos:NetXdQprcVkpaWU", service, 7, 1000, bytes32(uint256(1))
+        )
     {}
 
     function _verifyFinality(FinalityProof memory p, uint32 anchorLevel, bytes32)

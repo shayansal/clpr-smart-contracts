@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IEd25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/lib/IEd25519Verifier.sol";
 import {TezosBlake2b} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosBlake2b.sol";
 import {TezosBls} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosBls.sol";
-import {TezosContextProof} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosContextProof.sol";
+import {TezosContextVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosContextVerifier.sol";
 import {TezosKeys} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosKeys.sol";
 import {TezosSampler} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosSampler.sol";
 import {TezosSignatureCache} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosSignatureCache.sol";
@@ -41,6 +41,8 @@ abstract contract TezosLightClient {
     uint8 internal constant TAG_ATTESTATION_WITH_DAL = 23;
     uint8 internal constant TAG_BLS_MODE_ATTESTATION = 41;
     uint8 internal constant WATERMARK_ATTESTATION = 0x13;
+    /// @dev `absentStep` value for {TezosContextProof.verify} when no absence is checked.
+    uint256 internal constant NO_ABSENCE = type(uint256).max;
 
     /// @notice Per-deployment chain parameters (read from the chain's constants at deployment).
     struct Profile {
@@ -107,12 +109,30 @@ abstract contract TezosLightClient {
     Profile internal _profile;
     IEd25519Verifier public immutable ED25519;
     TezosSignatureCache public immutable CACHE;
+    TezosContextVerifier public immutable CONTEXT;
 
-    constructor(Profile memory profile_, IEd25519Verifier ed25519, TezosSignatureCache cache) {
-        if (address(ed25519) == address(0) || address(cache) == address(0)) revert ZeroDependency();
+    constructor(
+        Profile memory profile_,
+        IEd25519Verifier ed25519,
+        TezosSignatureCache cache,
+        TezosContextVerifier context
+    ) {
+        if (address(ed25519) == address(0) || address(cache) == address(0) || address(context) == address(0)) {
+            revert ZeroDependency();
+        }
         _profile = profile_;
         ED25519 = ed25519;
         CACHE = cache;
+        CONTEXT = context;
+    }
+
+    /// @dev Context value at `steps` under `root` (no absence check).
+    function _contextValue(bytes32 root, bytes[] memory steps, bytes memory proof)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return CONTEXT.verify(root, steps, proof, NO_ABSENCE, bytes32(0));
     }
 
     function profile() external view returns (Profile memory) {
@@ -147,10 +167,19 @@ abstract contract TezosLightClient {
         // 1. Rights for L's cycle, from the anchor state.
         uint256 sinceEra = p.level - pr.eraFirstLevel;
         string memory cycle = Strings.toString(pr.eraFirstCycle + sinceEra / pr.blocksPerCycle);
+        // The anchor state must not schedule "all bakers attest" (`data/all_bakers_attest_first_level`
+        // absent): that mode replaces sampled slots with per-delegate stake and starts at least
+        // consensus_rights_delay + 1 cycles after it is recorded, i.e. after every cycle this anchor covers.
         TezosSampler.Sampler memory sampler = TezosSampler.parse(
-            TezosContextProof.verify(anchorRoot, _cyclePath(cycle, "delegate_sampler_state"), p.samplerProof)
+            CONTEXT.verify(
+                anchorRoot,
+                _cyclePath(cycle, "delegate_sampler_state"),
+                p.samplerProof,
+                1,
+                keccak256("all_bakers_attest_first_level")
+            )
         );
-        bytes memory seed = TezosContextProof.verify(anchorRoot, _cyclePath(cycle, "random_seed"), p.seedProof);
+        bytes memory seed = _contextValue(anchorRoot, _cyclePath(cycle, "random_seed"), p.seedProof);
         if (seed.length != 32) revert BadSeed();
         // casting is safe: seed.length == 32 is checked above.
         // forge-lint: disable-next-line(unsafe-typecast)

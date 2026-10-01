@@ -7,7 +7,7 @@ import {ClprEvmBundleVerifier} from "@hiero-ledger/clpr/verifiers/evm/common/Clp
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {TezosBlake2b} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosBlake2b.sol";
-import {TezosContextProof} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosContextProof.sol";
+import {TezosContextVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosContextVerifier.sol";
 import {TezosLightClient} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosLightClient.sol";
 import {TezosSignatureCache} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosSignatureCache.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
@@ -76,12 +76,13 @@ contract TezosVerifier is TezosLightClient, ClprEvmBundleVerifier {
         Profile memory profile_,
         IEd25519Verifier ed25519,
         TezosSignatureCache cache,
+        TezosContextVerifier context,
         string memory chainId,
         bytes memory serviceAddr,
         uint256 bigMapId,
         uint32 checkpointLevel,
         bytes32 checkpointRoot
-    ) TezosLightClient(profile_, ed25519, cache) {
+    ) TezosLightClient(profile_, ed25519, cache, context) {
         if (serviceAddr.length != 22 || serviceAddr[0] != 0x01 || serviceAddr[21] != 0x00) {
             revert WrongServiceAddress();
         }
@@ -165,7 +166,7 @@ contract TezosVerifier is TezosLightClient, ClprEvmBundleVerifier {
         (uint32 stateLevel, bytes32 root) = _verifyFinality(p.finality, CHECKPOINT_LEVEL, CHECKPOINT_ROOT);
 
         // The pinned contract really owns BIG_MAP_ID.
-        bytes memory storageValue = TezosContextProof.verify(root, _storagePath(), p.storageProof);
+        bytes memory storageValue = _contextValue(root, _storagePath(), p.storageProof);
         if (keccak256(storageValue) != keccak256(abi.encodePacked(bytes1(0x00), _zarith(BIG_MAP_ID)))) {
             revert StorageMismatch();
         }
@@ -207,7 +208,7 @@ contract TezosVerifier is TezosLightClient, ClprEvmBundleVerifier {
     ) external view returns (bytes memory value, bytes memory newTrustAnchor) {
         (uint32 anchorLevel, bytes32 anchorRoot) = decodeAnchor(trustAnchor);
         (uint32 stateLevel, bytes32 root) = _verifyFinality(finality, anchorLevel, anchorRoot);
-        value = TezosContextProof.verify(root, steps, valueProof);
+        value = _contextValue(root, steps, valueProof);
         newTrustAnchor = encodeAnchor(stateLevel, root);
     }
 
@@ -262,7 +263,7 @@ contract TezosVerifier is TezosLightClient, ClprEvmBundleVerifier {
         view
         returns (bytes memory out)
     {
-        bytes memory v = TezosContextProof.verify(root, bigMapPath(BIG_MAP_ID, key), proof);
+        bytes memory v = _contextValue(root, bigMapPath(BIG_MAP_ID, key), proof);
         if (v.length != 5 + expectedLength || v[0] != 0x0a) revert InvalidMichelsonBytes();
         uint256 len;
         assembly ("memory-safe") {

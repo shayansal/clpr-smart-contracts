@@ -148,17 +148,19 @@ describe("Tezos verifier on live mainnet data (fixture replay)", () => {
         };
         await deploy("Ed25519Verifier");
         await deploy("TezosSignatureCache", [addr.Ed25519Verifier]);
+        await deploy("TezosContextVerifier");
         await deploy("TezosVerifier", [
             profile,
             addr.Ed25519Verifier,
             addr.TezosSignatureCache,
+            addr.TezosContextVerifier,
             d.caip2,
             "0x01e0d2b0c72e6767ff58e09b4ceb6b77b8ad6e922d00",
             31n,
             d.anchorLevel,
             d.anchorRoot,
         ]);
-        await deploy("EtherlinkCementedState", [profile, addr.Ed25519Verifier, addr.TezosSignatureCache, d.etherlink.rollupHex]);
+        await deploy("EtherlinkCementedState", [profile, addr.Ed25519Verifier, addr.TezosSignatureCache, addr.TezosContextVerifier, d.etherlink.rollupHex]);
     }, 120_000);
 
     afterAll(() => {

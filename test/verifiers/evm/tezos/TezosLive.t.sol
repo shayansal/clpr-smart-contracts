@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Ed25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/Ed25519Verifier.sol";
 import {TezosSignatureCache} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosSignatureCache.sol";
 import {TezosLightClient} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosLightClient.sol";
+import {TezosContextVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosContextVerifier.sol";
 import {TezosVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosVerifier.sol";
 import {TezosContextProof} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosContextProof.sol";
 import {EtherlinkCementedState} from "@hiero-ledger/clpr/verifiers/evm/tezos/EtherlinkCementedState.sol";
@@ -19,15 +20,18 @@ contract TezosLiveTest is Test {
     Ed25519Verifier internal ed;
     TezosSignatureCache internal cache;
     TezosVerifier internal v;
+    TezosContextVerifier internal ctxv;
 
     function setUp() public {
         j = vm.readFile(string.concat(vm.projectRoot(), "/test/e2e/fixtures/tezos-live/mainnet.json"));
         ed = new Ed25519Verifier();
         cache = new TezosSignatureCache(ed);
+        ctxv = new TezosContextVerifier();
         v = new TezosVerifier(
             _profile(),
             ed,
             cache,
+            ctxv,
             vm.parseJsonString(j, ".derived.caip2"),
             hex"01e0d2b0c72e6767ff58e09b4ceb6b77b8ad6e922d00", // any KT1; the generic entry point ignores it
             31,
@@ -119,7 +123,7 @@ contract TezosLiveTest is Test {
 
     function test_live_etherlinkCementedState() public {
         EtherlinkCementedState e = new EtherlinkCementedState(
-            _profile(), ed, cache, bytes20(vm.parseJsonBytes(j, ".derived.etherlink.rollupHex"))
+            _profile(), ed, cache, ctxv, bytes20(vm.parseJsonBytes(j, ".derived.etherlink.rollupHex"))
         );
         TezosLightClient.FinalityProof memory f = _finality(".derived.finalityInline");
         bytes memory anchor = vm.parseJsonBytes(j, ".derived.anchor");

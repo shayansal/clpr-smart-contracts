@@ -6,6 +6,7 @@ import {Ed25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/Ed25519Verif
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {TezosSignatureCache} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosSignatureCache.sol";
 import {TezosLightClient} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosLightClient.sol";
+import {TezosContextVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosContextVerifier.sol";
 import {TezosVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosVerifier.sol";
 import {TezosBlake2b} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosBlake2b.sol";
 import {TezosContextProof} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosContextProof.sol";
@@ -22,7 +23,7 @@ contract TezosLibHarness {
     }
 
     function contextValue(bytes32 root, bytes[] memory steps, bytes memory proof) external view returns (bytes memory) {
-        return TezosContextProof.verify(root, steps, proof);
+        return TezosContextProof.verify(root, steps, proof, type(uint256).max, bytes32(0));
     }
 
     /// Slots in [0, committee) owned by `index` (signer flag set only for it).
@@ -68,6 +69,7 @@ contract TezosVerifierTest is Test {
             p,
             ed,
             cache,
+            new TezosContextVerifier(),
             vm.parseJsonString(j, ".caip2"),
             vm.parseJsonBytes(j, ".service"),
             vm.parseJsonUint(j, ".bigMapId"),
@@ -215,6 +217,12 @@ contract TezosVerifierTest is Test {
         // The real proofs against the other anchor root do not hash to it.
         vm.expectRevert(abi.encodeWithSelector(TezosContextProof.ProofHashMismatch.selector, 0));
         v.verifyBundle(_b(".bundle"), _b(".altAnchor"), ctx);
+    }
+
+    function test_rejects_allBakersAttestScheduled() public {
+        // The anchor state records `all_bakers_attest_first_level`: slot rights no longer apply.
+        vm.expectRevert(abi.encodeWithSelector(TezosContextProof.ProofEntryPresent.selector, 1));
+        v.verifyBundle(_bundleWith(_fin(".finalityAbaa")), _b(".abaaAnchor"), ctx);
     }
 
     function test_rejects_staleOrReplayed() public {

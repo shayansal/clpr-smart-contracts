@@ -34,6 +34,7 @@ library TezosContextProof {
     error ProofStepNotFound(uint256 step);
     error ProofKindMismatch(uint256 step);
     error ProofTrailingBytes();
+    error ProofEntryPresent(uint256 level);
 
     struct Cursor {
         uint256 base; // memory address of proof[0]
@@ -42,7 +43,15 @@ library TezosContextProof {
     }
 
     /// @notice Verify `proof` for `steps` under the context tree `root`; returns the value.
-    function verify(bytes32 root, bytes[] memory steps, bytes memory proof) internal view returns (bytes memory value) {
+    /// @notice Verify `proof` for `steps` under the context tree `root`; returns the value. If
+    ///         `absentName` is non-zero, also require that the directory which lists
+    ///         `steps[absentStep]` has no entry whose name hashes (keccak256) to `absentName`; that
+    ///         directory must then be a stable (fully listed) directory, so absence is proven.
+    function verify(bytes32 root, bytes[] memory steps, bytes memory proof, uint256 absentStep, bytes32 absentName)
+        internal
+        view
+        returns (bytes memory value)
+    {
         Cursor memory c;
         assembly ("memory-safe") {
             mstore(c, add(proof, 0x20))
@@ -59,6 +68,7 @@ library TezosContextProof {
                 (uint8 kind, uint256 pre, uint256 len) = _readLevel(c);
                 if (TezosBlake2b.hashAt(pre, len, TezosBlake2b.H0_32) != expected) revert ProofHashMismatch(level);
                 if (kind == LEVEL_INODE_TREE) {
+                    if (s == absentStep) revert ProofMalformed(level); // absence needs a full listing
                     uint256 ptr = _u8(c);
                     expected = _inodeTreePointer(pre, len, ptr, level);
                     level++;
@@ -66,8 +76,10 @@ library TezosContextProof {
                 }
                 bool found;
                 if (kind == LEVEL_V1) {
-                    (found, isContents, expected) = _findV1(pre, len, stepHash, level);
+                    (found, isContents, expected) =
+                        _findV1(pre, len, stepHash, level, s == absentStep ? absentName : bytes32(0));
                 } else if (kind == LEVEL_INODE_VALUES) {
+                    if (s == absentStep) revert ProofMalformed(level);
                     (found, isContents, expected) = _findValues(pre, len, stepHash, level);
                 } else {
                     revert ProofMalformed(level);
@@ -148,7 +160,7 @@ library TezosContextProof {
     }
 
     /// @dev Stable directory: u64be(n) ‖ n × [kind8 ‖ varint(len) ‖ name ‖ u64be(32) ‖ hash].
-    function _findV1(uint256 pre, uint256 len, bytes32 stepHash, uint256 level)
+    function _findV1(uint256 pre, uint256 len, bytes32 stepHash, uint256 level, bytes32 absentName)
         private
         pure
         returns (bool found, bool isContents, bytes32 child)
@@ -173,6 +185,7 @@ library TezosContextProof {
             assembly ("memory-safe") {
                 nh := keccak256(name, nameLen)
             }
+            if (absentName != bytes32(0) && nh == absentName) revert ProofEntryPresent(level);
             if (!found && nh == stepHash) {
                 found = true;
                 isContents = kind8 != 0;

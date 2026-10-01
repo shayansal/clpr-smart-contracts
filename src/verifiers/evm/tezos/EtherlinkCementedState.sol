@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IEd25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/lib/IEd25519Verifier.sol";
 import {TezosBlake2b} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosBlake2b.sol";
-import {TezosContextProof} from "@hiero-ledger/clpr/libraries/proof/tezos/TezosContextProof.sol";
+import {TezosContextVerifier} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosContextVerifier.sol";
 import {TezosLightClient} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosLightClient.sol";
 import {TezosSignatureCache} from "@hiero-ledger/clpr/verifiers/evm/tezos/TezosSignatureCache.sol";
 
@@ -32,9 +32,13 @@ contract EtherlinkCementedState is TezosLightClient {
 
     error BadCommitment();
 
-    constructor(Profile memory profile_, IEd25519Verifier ed25519, TezosSignatureCache cache, bytes20 rollup)
-        TezosLightClient(profile_, ed25519, cache)
-    {
+    constructor(
+        Profile memory profile_,
+        IEd25519Verifier ed25519,
+        TezosSignatureCache cache,
+        TezosContextVerifier context,
+        bytes20 rollup
+    ) TezosLightClient(profile_, ed25519, cache, context) {
         bytes16 digits = "0123456789abcdef";
         bytes memory h = new bytes(40);
         for (uint256 i = 0; i < 20; i++) {
@@ -66,7 +70,7 @@ contract EtherlinkCementedState is TezosLightClient {
         steps[3] = rollupHex;
         steps[4] = "data";
         steps[5] = "last_cemented_commitment";
-        bytes memory lcc = TezosContextProof.verify(root, steps, lccProof);
+        bytes memory lcc = _contextValue(root, steps, lccProof);
         if (lcc.length != 32) revert BadCommitment();
         // casting is safe: lcc.length == 32 is checked above.
         // forge-lint: disable-next-line(unsafe-typecast)
@@ -80,7 +84,7 @@ contract EtherlinkCementedState is TezosLightClient {
         csteps[4] = "commitments";
         csteps[5] = _hex(commitmentHash);
         csteps[6] = "data";
-        bytes memory c = TezosContextProof.verify(root, csteps, commitmentProof);
+        bytes memory c = _contextValue(root, csteps, commitmentProof);
         if (c.length != 77 || c[0] != 0x00) revert BadCommitment();
         uint256 at;
         assembly ("memory-safe") {
