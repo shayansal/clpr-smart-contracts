@@ -1,6 +1,6 @@
 # OP Stack verifiers
 
-> **Sources**: [OpStackVerifier.sol](./OpStackVerifier.sol) (FINALIZED), [OpStackProposedVerifier.sol](./OpStackProposedVerifier.sol) (PROPOSED), [OpStackVerifierBase.sol](./OpStackVerifierBase.sol), [OpStackOutputRootProof.sol](../../../libraries/proof/opstack/OpStackOutputRootProof.sol), [EthL1StateVerifier.sol](../ethereum/EthL1StateVerifier.sol), [EthBeaconLightClient.sol](../../../libraries/proof/beacon/EthBeaconLightClient.sol)
+> **Sources**: [OpStackVerifier.sol](./OpStackVerifier.sol) (FINALIZED), [OpStackProposedVerifier.sol](./OpStackProposedVerifier.sol) (PROPOSED), [OpStackVerifierBase.sol](./OpStackVerifierBase.sol), [profiles/XLayerProfile.sol](./profiles/XLayerProfile.sol), [OpStackOutputRootProof.sol](../../../libraries/proof/opstack/OpStackOutputRootProof.sol), [EthL1StateVerifier.sol](../ethereum/EthL1StateVerifier.sol), [EthBeaconLightClient.sol](../../../libraries/proof/beacon/EthBeaconLightClient.sol)
 > **Interface**: [IClprVerifier.sol](../../../interfaces/IClprVerifier.sol)
 
 ---
@@ -78,7 +78,9 @@ Anything held in an immutable is bound by code hash, never trusted by value:
 - The pinned `ANCHOR_STATE_REGISTRY_IMPL_CODE_HASH` fixes `DISPUTE_GAME_FINALITY_DELAY_SECONDS`. If the implementation is upgraded, verification reverts with `AnchorStateRegistryImplMismatch`.
 - The pinned `GAME_IMPLEMENTATION` fixes the game's semantics, its storage layout and its ASR/DGF references. Games created by a new implementation revert with `GameImplementationMismatch`.
 
-A contracts upgrade on the L2 therefore stalls the Channel safely instead of mis-reading state. Recovery means redeploying with the new profile, which is pure data (§6). This is the "Class B" path of the fork-aware-verifier ADR (`clpr-spec/ADR/2026-10-01-fork-aware-verifiers.md`). A new proof system (a new root format, or a portal without an ASR) is Class C.
+A contracts upgrade on the L2 therefore stalls the Channel safely instead of mis-reading state.
+
+Pinning does **not** protect against the upgrade key itself. Whoever can upgrade the ASR proxy can, in one L1 transaction, point it at an implementation that rewrites its storage (`disputeGameFactory`, `anchorGame`), then point it back at the pinned implementation. The code-hash check then passes over forged storage. The FINALIZED tier therefore always trusts the ASR's upgrade key (on most chains, the Superchain upgrade multisig). §7.1 covers X Layer's keys. Recovery means redeploying with the new profile, which is pure data (§6). This is the "Class B" path of the fork-aware-verifier ADR (`clpr-spec/ADR/2026-10-01-fork-aware-verifiers.md`). A new proof system (a new root format, or a portal without an ASR) is Class C.
 
 ---
 
@@ -137,10 +139,12 @@ All values below were read from verified sources (Sourcify, Blockscout) and live
 | Base `AggregateVerifier` 0.2.0 (621) | 0, 18 |
 | `SuperFaultDisputeGame` 0.8.0 (9) | 9, 0 |
 | `PermissionedDisputeGame` 2.4.0 (1) | 10, 0 |
-| `OPSuccinctFaultDisputeGame` 2.0.0 (42) | 9, 0 |
+| `OPSuccinctFaultDisputeGame` 2.0.0 (42), with ASR 3.5.0 and DGF 1.3.0 on X Layer | 9, 0 |
 | `SuperPermissionedDisputeGame` 1.1.0 (5) | 0, 17 |
 
 ---
+
+**Pinned profiles.** [`profiles/XLayerProfile.sol`](./profiles/XLayerProfile.sol) is X Layer's complete profile as a Solidity library: `new OpStackVerifier(l1, 1606824023, 12, XLayerProfile.profile())`. The same values are in `XLAYER_MAINNET_PROFILE` ([`opstack.ts`](../../../../test/e2e/relay/opstack.ts)). Both tests check them against the live chain.
 
 ## 7. Chain coverage
 
@@ -158,11 +162,38 @@ Coverage depends on the settlement contracts, not on the brand. A chain is cover
 | **Celo** | OPSuccinctFaultDisputeGame, OP Succinct Lite (42) | ✅ | `OUTPUT_ROOT`, chain id 42220. Trust includes the SP1 verifier. |
 | **Blast** | `L2OutputOracle` (portal 1.10.0, no ASR) | ❌ | Needs an L2OutputOracle profile (Class C) |
 | **Mantle** | Portal 1.7.0 without an ASR (OP Succinct via an output oracle) | ❌ | Class C |
-| **X Layer**, **Katana** | Settle through the Polygon AggLayer (not probed here) | ❌ | Not an OP-Stack ASR/DGF settlement. Needs its own verifier. |
+| **X Layer** | OPSuccinctFaultDisputeGame 2.0.0, OP Succinct Lite (42), since 2026-06-30. ASR 3.5.0, delay 3.5 d. | ✅ (weaker) **live-verified on mainnet** to the L2 state root (§8.2) | [`XLayerProfile`](./profiles/XLayerProfile.sol): `OUTPUT_ROOT`, chain id 196. Permissioned proposer, single challenger, and upgrade keys with no delay (§7.1). |
+| **Katana** | Polygon AggLayer `AggchainFEP` (output oracle, no ASR) | ❌ | Class C: the output-oracle verifier on `feat/opadapters-verifier` |
 
-Only Base Sepolia was exercised end to end in this work. For every other ✅ row, confirm the profile against the chain at deploy time with the same probe (`respectedGameType`, `gameImpls`, and Sourcify layouts). The live builder checks it off-chain against the chain.
+Only Base Sepolia and X Layer were exercised on live data in this work. For every other ✅ row, confirm the profile against the chain at deploy time with the same probe (`respectedGameType`, `gameImpls`, and Sourcify layouts). The live builder checks it off-chain against the chain.
 
 ---
+
+### 7.1 X Layer: where its state is provable, and what FINALIZED trusts
+
+**Which contract.** X Layer (chain 196) is connected to Ethereum twice. Only one connection holds anything provable:
+
+| L1 contract | What it stores | Provable L2 state? |
+|---|---|---|
+| OP Stack fault proofs: OptimismPortal `0x6405…9993` (5.2.0) → AnchorStateRegistry `0x0005…149d` (3.5.0) → DisputeGameFactory `0x9D4c…f675` (1.3.0) → OP Succinct Lite games (type 42) | One game per 3,600 L2 blocks (about 1 h). Each game's `rootClaim` is the v0 output root of its L2 block. | **Yes.** This is what the X Layer profile proves. |
+| AggLayer: RollupManager `0x5132…7aB2` rollup 3 → `AggchainECDSAMultisig` `0x2B0e…0507` (1-of-1 signer `0x610D…c102`) | `lastLocalExitRoot` and `lastPessimisticRoot` only (verifier type 2, ALGateway) | **No.** No L2 state or output root is stored. |
+
+The earlier "X Layer is unprovable" finding was about the AggLayer row. It is still true there, and the OP Stack row is where the state is. Assets do not move through the OP Stack contracts: the portal holds 0 ETH and has no ETHLockbox, and deposits and withdrawals use the AggLayer unified bridge. The games therefore secure no L1 funds, and their bonds are nominal (1e10 wei to propose or to challenge). Their only role is to attest X Layer's state, which CLPR consumes.
+
+**What FINALIZED trusts on X Layer** (read from mainnet on 2026-10-01). This is everything in §2, plus the following:
+
+- **A permissioned proposer.** The game's `AccessManager` `0x98BA…c17B` allows exactly one proposer, EOA `0xE439…394F`. Its `FALLBACK_TIMEOUT` is 31,536,000,000 s (about 1,000 years), so the permissionless-proposal fallback never triggers.
+- **A single challenger.** The same AccessManager allows exactly one challenger, EOA `0x736E…2FF6`, and `challengers[address(0)]` is false. A game that is not challenged within `maxChallengeDuration` (3,600 s) resolves `DEFENDER_WINS` **without any proof**. A wrong output root is therefore finalized unless that one challenger acts within the hour. FINALIZED is sound if the proposer is honest, or if the challenger is honest and live.
+- **SP1.** A challenged game resolves for the proposer only with an SP1 proof, under the vkeys and rollup-config hash in the pinned game implementation. The proof is checked through the SP1VerifierGateway `0x397A…a9B`, whose owner (Succinct) can add verifier routes.
+- **Upgrade keys with no delay:**
+  - The ASR, SystemConfig and OptimismPortal proxies share ProxyAdmin `0x313c…fee6`. It is owned directly by a 2-of-3 Safe `0xC290…D45A` with three EOA signers and **no timelock**. Through the upgrade-and-restore path (§3), this Safe can make both tiers accept an arbitrary output root within one L1 block.
+  - The DisputeGameFactory proxy and the factory's `owner` (`setImplementation`, `setInitBond`) sit behind a TimelockController `0xFa3A…52d6`. Its minimum delay is **1 hour**, its proposer and canceller are the same Safe, and anyone can execute. The timelock was installed recently. A new `gameImpls[42]` fails closed here (§3).
+  - EOA `0x6eE7…C6aA` holds several roles at once. It is the guardian (SystemConfig and SuperchainConfig), which can pause, blacklist and retire games and set the respected type. It is the SystemConfig owner, and the AccessManager owner, which can swap the proposer and the challenger instantly. It is also one of the Safe's three signers. Pause is not proven (§2). Blacklisting, retiring and type changes make verification fail closed.
+- **Another chain shares the factory.** The same DisputeGameFactory also hosts game type 1961, roughly hourly, for another L2. The verifier accepts only the respected type (42) and clones of the pinned implementation, so those games are rejected (`GameTypeNotRespected`, tested live).
+
+**Latency.** A game is proposed about 30 min after its L2 block. It resolves 1 h after creation if unchallenged, and is final 3.5 days after resolution. A message is therefore deliverable through FINALIZED about 3.6 days after its L2 block. PROPOSED delivers after about 30 min and trusts the proposer outright.
+
+**What would make it trust-minimized.** X Layer would need to open challenging (`challengers[address(0)] = true`), add an upgrade delay longer than the finality window to the ASR's ProxyAdmin, and separate the guardian and AccessManager roles from a single EOA. None of this is in the verifier's control. The profile is correct either way, and the verifier's code does not change.
 
 ## 8. Live data: Base Sepolia on Ethereum Sepolia
 
@@ -194,6 +225,32 @@ What runs on real data:
 
 ---
 
+### 8.2 Live data: X Layer on Ethereum mainnet
+
+The same builder records X Layer with `--chain xlayer`, into [`test/e2e/fixtures/xlayer-live/`](../../../../test/e2e/fixtures/xlayer-live/). The capture is taken at one attested mainnet block (510/512 participation):
+- X Layer's ASR (3.5.0) and its implementation, whose code hash and 302,400 s delay match `XLayerProfile`;
+- the DGF 1.3.0 registrations and the slots 0 and 9 and code of three type-42 games: the anchor game (`DEFENDER_WINS`, more than 3.5 days resolved), the newest resolved game (inside the delay), and the newest game (`IN_PROGRESS`);
+- the X Layer header of each game's block. Each `rootClaim` equals `keccak(0 ‖ stateRoot ‖ withdrawalsRoot ‖ hash)`.
+
+The verifiers are deployed from the pinned profile, not from captured values. On this real data:
+- **FINALIZED, ANCHOR and GAME mode, verify up to the X Layer state root** (`verifyL2StateRoot`). This covers L1 state, the ASR, the DGF, the game, the output root and the L2 `state_root`.
+- FINALIZED rejects the resolved game still inside the delay (`GameNotFinalized`) and the newest game (`GameNotResolved`). PROPOSED accepts both.
+- **Negative cases:** the factory's other game type (1961), a wrong preimage, another game's preimage, forged game code, an unpinned ASR or game implementation, and the Electra fork version.
+
+**L2 storage.** The FINALIZED path needs `eth_getProof` at an X Layer block at least 3.6 days old. No public X Layer endpoint serves that:
+- `rpc.xlayer.tech`, `xlayerrpc.okx.com` and thirdweb answer "rpc method is not whitelisted".
+- Ankr and BlockPI need keys.
+- `xlayer.drpc.org` (reth) serves `eth_getProof` at `"latest"` only. Any block number or hash fails with "distance to target block exceeds maximum proof window".
+
+The builder works around this. `npm run opstack-live:stage:xlayer` reads the proposer's cadence from L1 (every 3,600 L2 blocks), waits for the block the next game will claim, and keeps the `"latest"` proof whose root is that block's `stateRoot` ([`stageLatestL2Proof.ts`](../../../../test/e2e/relay/stageLatestL2Proof.ts)). A refresh run after the game is proposed carries the full PROPOSED `verifyBundle`, down to X Layer storage. A refresh run 3.6 days later carries the full FINALIZED `verifyBundle`. Without an archive node or a staged proof, the full FINALIZED bundle cannot be built from public data.
+
+```sh
+npm run opstack-live:stage:xlayer          # stage the next game's L2 proof (waits up to ~1 h)
+npm run opstack-live:refresh:xlayer        # capture; also rewrites test/verifiers/evm/opstack/fixtures/xlayer-live.json
+npm run test:e2e:opstack-live:xlayer       # replay on anvil
+forge test --match-contract OpStackXLayerLive
+```
+
 ## 9. Gas and size
 
 Hedera limits are 15M gas and 128 KB per transaction.
@@ -203,6 +260,10 @@ Hedera limits are 15M gas and 128 KB per transaction.
 | Live PROPOSED `verifyBundle`: full L2 proofs, 493/512 participation, 19 non-signers | 3,910,935 | 46,084 B |
 | Live FINALIZED `verifyL2StateRoot`, GAME mode | 2,765,246 | 32,676 B |
 | Live FINALIZED `verifyL2StateRoot`, ANCHOR mode | 2,473,604 | 27,876 B |
+
+| X Layer (mainnet, 510/512) FINALIZED `verifyL2StateRoot`, ANCHOR mode | 2,177,016 | 22,148 B |
+| X Layer FINALIZED `verifyL2StateRoot`, GAME mode | 2,577,100 | 26,948 B |
+| X Layer PROPOSED `verifyL2StateRoot`, newest game | 2,532,538 | 26,756 B |
 
 - A full FINALIZED bundle on live data is estimated at about 3.9M gas and 46 KB. It is the GAME-mode run above plus the same L2 proofs as the PROPOSED bundle.
 - A bundle that also rotates the committee adds about 67 KB and about 4.8M gas (see the `EthMainnetVerifier` README), giving about 8.7M gas and 113 KB. That is still within Hedera's limits, but relays should not put a manifest update into the same bundle as a rotation.
@@ -224,3 +285,4 @@ Hedera limits are 15M gas and 128 KB per transaction.
   - the L2 code-hash and channel binding;
   - an end-to-end run through the real `EthL1StateVerifier` with a generator sync committee.
 - [`test/e2e/tests/verifiers/opstack-live-base-sepolia.spec.ts`](../../../../test/e2e/tests/verifiers/opstack-live-base-sepolia.spec.ts) runs the live fixture (§8).
+- [`test/e2e/tests/verifiers/opstack-live-xlayer.spec.ts`](../../../../test/e2e/tests/verifiers/opstack-live-xlayer.spec.ts) and [`test/verifiers/evm/opstack/OpStackXLayerLive.t.sol`](../../../../test/verifiers/evm/opstack/OpStackXLayerLive.t.sol) run the X Layer mainnet fixture (§8.2) on anvil and in Foundry. Both deploy from the pinned profile.
