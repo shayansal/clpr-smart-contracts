@@ -244,6 +244,13 @@ test_rotation = script do
     exerciseCmd w.rulesCid ClprRules_RotateOperators with
       executor = op1; confirmationCids = badRot; newOperators = newOps
       newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 4
+  -- A minority threshold (1-of-3) is rejected: quorums must intersect.
+  weakRot <- quorum w [op1, op2]
+    (RotateOperators with newOperators = newOps; newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 1)
+  submitMustFail (asOp w.clpr op1) do
+    exerciseCmd w.rulesCid ClprRules_RotateOperators with
+      executor = op1; confirmationCids = weakRot; newOperators = newOps
+      newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 1
   -- Duplicate attestation keys are rejected.
   dupRot <- quorum w [op1, op2]
     (RotateOperators with newOperators = newOps; newAttestationKeys = map opKey [2, 2, 4]; newThreshold = 2)
