@@ -14,34 +14,20 @@ library ClprSha512 {
 
     /// @notice SHA-512 of `data` as two big-endian words (bytes 0..31 and 32..63 of the digest).
     function hash(bytes memory data) internal pure returns (bytes32 hi, bytes32 lo) {
-        bytes memory k = K;
-        assembly ("memory-safe") {
-            // Σ on a 64-bit value: one widening (x | x << 64), then plain right shifts.
-            // One round: only d and h change; the caller rotates the roles of a..h.
-            function rnd(a, b, c, d, e, f, g, h, kw) -> d2, h2 {
-                let y := or(e, shl(64, e))
-                let t1 :=
-                    add(
-                        add(h, and(xor(xor(shr(14, y), shr(18, y)), shr(41, y)), 0xffffffffffffffff)),
-                        add(xor(g, and(e, xor(f, g))), kw)
-                    )
-                d2 := and(add(d, t1), 0xffffffffffffffff)
-                y := or(a, shl(64, a))
-                h2 := and(
-                    add(
-                        add(t1, and(xor(xor(shr(28, y), shr(34, y)), shr(39, y)), 0xffffffffffffffff)),
-                        or(and(a, b), and(c, or(a, b)))
-                    ),
-                    0xffffffffffffffff
-                )
-            }
+        uint256 st = _init();
+        uint256 nblocks = (data.length + 144) / 128; // ceil((len + 1 + 16) / 128)
+        for (uint256 bi = 0; bi < nblocks; ++bi) {
+            _schedule(data, bi, nblocks, st);
+            _rounds(st);
+        }
+        return _digest(st);
+    }
 
-            let M := 0xffffffffffffffff
-            // Scratch past the free pointer (never claimed; the function is pure):
-            //   st: 8 state words | kw: 80 words of K[t] + W[t] | blk: 128-byte padded block
-            let st := mload(0x40)
-            let kw := add(st, 0x100)
-            let blk := add(kw, 0xa00)
+    /// @dev Work area: 8 state words, then 80 words of K[t] + W[t], then a 128-byte block buffer.
+    function _init() private pure returns (uint256 st) {
+        uint256[] memory area = new uint256[](8 + 80 + 4);
+        assembly ("memory-safe") {
+            st := add(area, 0x20)
             mstore(st, 0x6a09e667f3bcc908)
             mstore(add(st, 0x20), 0xbb67ae8584caa73b)
             mstore(add(st, 0x40), 0x3c6ef372fe94f82b)
@@ -50,97 +36,142 @@ library ClprSha512 {
             mstore(add(st, 0xa0), 0x9b05688c2b3e6c1f)
             mstore(add(st, 0xc0), 0x1f83d9abfb41bd6b)
             mstore(add(st, 0xe0), 0x5be0cd19137e2179)
+        }
+    }
 
+    function _digest(uint256 st) private pure returns (bytes32 hi, bytes32 lo) {
+        assembly ("memory-safe") {
+            hi :=
+                or(
+                    or(shl(192, mload(st)), shl(128, mload(add(st, 0x20)))),
+                    or(shl(64, mload(add(st, 0x40))), mload(add(st, 0x60)))
+                )
+            lo :=
+                or(
+                    or(shl(192, mload(add(st, 0x80))), shl(128, mload(add(st, 0xa0)))),
+                    or(shl(64, mload(add(st, 0xc0))), mload(add(st, 0xe0)))
+                )
+        }
+    }
+
+    /// @dev Pad block `bi` into the buffer and expand K[t] + W[t] for t = 0..79.
+    function _schedule(bytes memory data, uint256 bi, uint256 nblocks, uint256 st) private pure {
+        bytes memory k = K;
+        assembly ("memory-safe") {
+            let M := 0xffffffffffffffff
+            let kw := add(st, 0x100)
+            let blk := add(kw, 0xa00)
             let len := mload(data)
-            let src := add(data, 0x20)
-            // Blocks after padding: ceil((len + 1 + 16) / 128).
-            let nblocks := div(add(len, 144), 128)
-            let kp := add(k, 0x20)
-
-            for { let bi := 0 } lt(bi, nblocks) { bi := add(bi, 1) } {
-                let off := mul(bi, 128)
-                mstore(blk, 0)
-                mstore(add(blk, 0x20), 0)
-                mstore(add(blk, 0x40), 0)
-                mstore(add(blk, 0x60), 0)
-                if lt(off, len) {
-                    let n := sub(len, off)
-                    if gt(n, 128) { n := 128 }
-                    mcopy(blk, add(src, off), n)
-                    if lt(n, 128) { mstore8(add(blk, n), 0x80) }
-                }
-                if eq(off, len) { mstore8(blk, 0x80) }
-                if eq(bi, sub(nblocks, 1)) {
-                    // 128-bit big-endian bit length (high half zero). OR it in: bytes 96..111 of
-                    // the last block may still hold message data.
-                    mstore(add(blk, 96), or(mload(add(blk, 96)), mul(len, 8)))
-                }
-
-                // Message schedule, stored as W[t] first and turned into K[t] + W[t] below.
-                for { let i := 0 } lt(i, 16) { i := add(i, 1) } {
-                    mstore(add(kw, shl(5, i)), shr(192, mload(add(blk, shl(3, i)))))
-                }
-                for { let t := 16 } lt(t, 80) { t := add(t, 1) } {
-                    let w15 := mload(add(kw, shl(5, sub(t, 15))))
-                    let w2 := mload(add(kw, shl(5, sub(t, 2))))
-                    let y15 := or(w15, shl(64, w15))
-                    let y2 := or(w2, shl(64, w2))
-                    let s0 := xor(and(xor(shr(1, y15), shr(8, y15)), M), shr(7, w15))
-                    let s1 := xor(and(xor(shr(19, y2), shr(61, y2)), M), shr(6, w2))
-                    mstore(
-                        add(kw, shl(5, t)),
-                        and(
-                            add(
-                                add(mload(add(kw, shl(5, sub(t, 16)))), s0),
-                                add(mload(add(kw, shl(5, sub(t, 7)))), s1)
-                            ),
-                            M
-                        )
-                    )
-                }
-                for { let t := 0 } lt(t, 80) { t := add(t, 1) } {
-                    let q := add(kw, shl(5, t))
-                    mstore(q, add(mload(q), shr(192, mload(add(kp, shl(3, t))))))
-                }
-
-                let a := mload(st)
-                let b := mload(add(st, 0x20))
-                let c := mload(add(st, 0x40))
-                let d := mload(add(st, 0x60))
-                let e := mload(add(st, 0x80))
-                let f := mload(add(st, 0xa0))
-                let g := mload(add(st, 0xc0))
-                let h := mload(add(st, 0xe0))
-
-                for { let q := kw } lt(q, add(kw, 0xa00)) { q := add(q, 0x100) } {
-                    d, h := rnd(a, b, c, d, e, f, g, h, mload(q))
-                    c, g := rnd(h, a, b, c, d, e, f, g, mload(add(q, 0x20)))
-                    b, f := rnd(g, h, a, b, c, d, e, f, mload(add(q, 0x40)))
-                    a, e := rnd(f, g, h, a, b, c, d, e, mload(add(q, 0x60)))
-                    h, d := rnd(e, f, g, h, a, b, c, d, mload(add(q, 0x80)))
-                    g, c := rnd(d, e, f, g, h, a, b, c, mload(add(q, 0xa0)))
-                    f, b := rnd(c, d, e, f, g, h, a, b, mload(add(q, 0xc0)))
-                    e, a := rnd(b, c, d, e, f, g, h, a, mload(add(q, 0xe0)))
-                }
-
-                mstore(st, and(add(mload(st), a), M))
-                mstore(add(st, 0x20), and(add(mload(add(st, 0x20)), b), M))
-                mstore(add(st, 0x40), and(add(mload(add(st, 0x40)), c), M))
-                mstore(add(st, 0x60), and(add(mload(add(st, 0x60)), d), M))
-                mstore(add(st, 0x80), and(add(mload(add(st, 0x80)), e), M))
-                mstore(add(st, 0xa0), and(add(mload(add(st, 0xa0)), f), M))
-                mstore(add(st, 0xc0), and(add(mload(add(st, 0xc0)), g), M))
-                mstore(add(st, 0xe0), and(add(mload(add(st, 0xe0)), h), M))
+            let off := mul(bi, 128)
+            mstore(blk, 0)
+            mstore(add(blk, 0x20), 0)
+            mstore(add(blk, 0x40), 0)
+            mstore(add(blk, 0x60), 0)
+            if lt(off, len) {
+                let n := sub(len, off)
+                if gt(n, 128) { n := 128 }
+                mcopy(blk, add(add(data, 0x20), off), n)
+                if lt(n, 128) { mstore8(add(blk, n), 0x80) }
             }
+            if eq(off, len) { mstore8(blk, 0x80) }
+            if eq(bi, sub(nblocks, 1)) {
+                // 128-bit big-endian bit length (high half zero). OR it in: bytes 96..111 of the
+                // last block may still hold message data.
+                mstore(add(blk, 96), or(mload(add(blk, 96)), mul(len, 8)))
+            }
+            for { let i := 0 } lt(i, 16) { i := add(i, 1) } {
+                mstore(add(kw, shl(5, i)), shr(192, mload(add(blk, shl(3, i)))))
+            }
+            for { let t := 16 } lt(t, 80) { t := add(t, 1) } {
+                let w15 := mload(add(kw, shl(5, sub(t, 15))))
+                let w2 := mload(add(kw, shl(5, sub(t, 2))))
+                let y15 := or(w15, shl(64, w15))
+                let y2 := or(w2, shl(64, w2))
+                let s0 := xor(and(xor(shr(1, y15), shr(8, y15)), M), shr(7, w15))
+                let s1 := xor(and(xor(shr(19, y2), shr(61, y2)), M), shr(6, w2))
+                mstore(
+                    add(kw, shl(5, t)),
+                    and(add(add(mload(add(kw, shl(5, sub(t, 16)))), s0), add(mload(add(kw, shl(5, sub(t, 7)))), s1)), M)
+                )
+            }
+            let kp := add(k, 0x20)
+            for { let t := 0 } lt(t, 80) { t := add(t, 1) } {
+                let q := add(kw, shl(5, t))
+                mstore(q, add(mload(q), shr(192, mload(add(kp, shl(3, t))))))
+            }
+        }
+    }
 
-            hi := or(
-                or(shl(192, mload(st)), shl(128, mload(add(st, 0x20)))),
-                or(shl(64, mload(add(st, 0x40))), mload(add(st, 0x60)))
-            )
-            lo := or(
-                or(shl(192, mload(add(st, 0x80))), shl(128, mload(add(st, 0xa0)))),
-                or(shl(64, mload(add(st, 0xc0))), mload(add(st, 0xe0)))
-            )
+    /// @dev 80 rounds over the prepared K[t] + W[t], unrolled by eight so the a..h roles rotate by
+    ///      renaming; then add into the state.
+    function _rounds(uint256 st) private pure {
+        assembly ("memory-safe") {
+            // A round only changes d and h: t1 = h + Σ1(e) + Ch(e,f,g) + K + W, d += t1,
+            // h = t1 + Σ0(a) + Maj(a,b,c). Σ widens once (x | x << 64) and uses right shifts.
+            function t1of(e, f, g, h, kw) -> t1 {
+                let y := or(e, shl(64, e))
+                t1 :=
+                    add(
+                        add(h, and(xor(xor(shr(14, y), shr(18, y)), shr(41, y)), 0xffffffffffffffff)),
+                        add(xor(g, and(e, xor(f, g))), kw)
+                    )
+            }
+            function hof(a, b, c, t1) -> h2 {
+                let y := or(a, shl(64, a))
+                h2 :=
+                    and(
+                        add(
+                            add(t1, and(xor(xor(shr(28, y), shr(34, y)), shr(39, y)), 0xffffffffffffffff)),
+                            or(and(a, b), and(c, or(a, b)))
+                        ),
+                        0xffffffffffffffff
+                    )
+            }
+            let a := mload(st)
+            let b := mload(add(st, 0x20))
+            let c := mload(add(st, 0x40))
+            let d := mload(add(st, 0x60))
+            let e := mload(add(st, 0x80))
+            let f := mload(add(st, 0xa0))
+            let g := mload(add(st, 0xc0))
+            let h := mload(add(st, 0xe0))
+            let t
+            let qEnd := add(st, 0xb00)
+            for { let q := add(st, 0x100) } lt(q, qEnd) { q := add(q, 0x100) } {
+                t := t1of(e, f, g, h, mload(q))
+                d := and(add(d, t), 0xffffffffffffffff)
+                h := hof(a, b, c, t)
+                t := t1of(d, e, f, g, mload(add(q, 0x20)))
+                c := and(add(c, t), 0xffffffffffffffff)
+                g := hof(h, a, b, t)
+                t := t1of(c, d, e, f, mload(add(q, 0x40)))
+                b := and(add(b, t), 0xffffffffffffffff)
+                f := hof(g, h, a, t)
+                t := t1of(b, c, d, e, mload(add(q, 0x60)))
+                a := and(add(a, t), 0xffffffffffffffff)
+                e := hof(f, g, h, t)
+                t := t1of(a, b, c, d, mload(add(q, 0x80)))
+                h := and(add(h, t), 0xffffffffffffffff)
+                d := hof(e, f, g, t)
+                t := t1of(h, a, b, c, mload(add(q, 0xa0)))
+                g := and(add(g, t), 0xffffffffffffffff)
+                c := hof(d, e, f, t)
+                t := t1of(g, h, a, b, mload(add(q, 0xc0)))
+                f := and(add(f, t), 0xffffffffffffffff)
+                b := hof(c, d, e, t)
+                t := t1of(f, g, h, a, mload(add(q, 0xe0)))
+                e := and(add(e, t), 0xffffffffffffffff)
+                a := hof(b, c, d, t)
+            }
+            let M := 0xffffffffffffffff
+            mstore(st, and(add(mload(st), a), M))
+            mstore(add(st, 0x20), and(add(mload(add(st, 0x20)), b), M))
+            mstore(add(st, 0x40), and(add(mload(add(st, 0x40)), c), M))
+            mstore(add(st, 0x60), and(add(mload(add(st, 0x60)), d), M))
+            mstore(add(st, 0x80), and(add(mload(add(st, 0x80)), e), M))
+            mstore(add(st, 0xa0), and(add(mload(add(st, 0xa0)), f), M))
+            mstore(add(st, 0xc0), and(add(mload(add(st, 0xc0)), g), M))
+            mstore(add(st, 0xe0), and(add(mload(add(st, 0xe0)), h), M))
         }
     }
 

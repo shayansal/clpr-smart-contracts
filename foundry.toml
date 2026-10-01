@@ -23,6 +23,13 @@ evm_version = "osaka"
 # essentially free, and the saving compounds across the still-inlined children.
 bytecode_hash = "none"
 cbor_metadata = false
+# The XRPL light client runs dozens of SHA-512 calls; at 2000 optimizer runs via-IR inlines the hash
+# at every call site and the contract passes EIP-170. Compile it for size instead.
+additional_compiler_profiles = [{ name = "size", optimizer_runs = 1 }]
+compilation_restrictions = [
+    { paths = "src/verifiers/evm/xrpl/XrplLightClient.sol", optimizer_runs = 1 },
+    { paths = "src/verifiers/evm/xrpl/XrplUnlKeys.sol", optimizer_runs = 1 },
+]
 fs_permissions = [
     { access = "read", path = "./storage-layout.json" },
     { access = "read", path = "test/verifiers/hiero/fixtures" },
