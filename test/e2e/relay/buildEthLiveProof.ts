@@ -40,8 +40,8 @@ import {
 ///   - the MPT account proof (and exclusion proofs for the channelId-derived slots) come from
 ///     `eth_getProof` at the attested execution block.
 ///
-/// Finality: the verifier authenticates the ATTESTED header (attested-head only); the finalized
-/// header in the update is used here solely to locate the bootstrap committee.
+/// The verifier authenticates the header the sync committee signed (the attested header); the
+/// update's finalized header is used here solely to locate the bootstrap committee.
 ///
 /// Two phases, so tests are deterministic offline:
 ///   `captureSepoliaLive()` → raw API responses (a `LiveCapture`, saved as JSON fixture)

@@ -234,7 +234,7 @@ graph TD
 | items 2–3 | The 17-field `ExecutionPayloadHeader` tree (Deneb/Electra/Fulu: 32 leaves, depth 5, `state_root` at index 2) is rebuilt from the light-client header. It gives 5 siblings. These are followed by the light-client `execution_branch` (4 siblings, gindex 25), for depth 9 and gindex `25·32 + 2 = 802`. That is exactly `GINDEX_EXECUTION_STATE_ROOT_IN_BODY`. |
 | item 6 (and 7) | `eth_getProof` at `attested_header.execution.block_number`. The builder checks the block's `stateRoot`/`hash` against the light-client header. |
 
-**Finality: attested-head only.** The verifier authenticates the header the sync committee signed (`attested_header`). It does not verify `finalized_header` or `finality_branch`. The builder uses the finalized header only to locate the bootstrap committee.
+**Signed header.** The verifier authenticates the beacon header that the sync committee signed (`attested_header`) and proves state from it. The builder uses the update's finalized header only to locate the bootstrap committee.
 
 **Fixture and test.** [`test/e2e/fixtures/sepolia-live/capture.json`](../../../../test/e2e/fixtures/sepolia-live/capture.json) holds one captured Sepolia (Fulu) dataset: the raw API responses. The builder is pure over it, so the test is deterministic offline:
 
