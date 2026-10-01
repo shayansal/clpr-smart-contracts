@@ -177,8 +177,7 @@ library TonBlocks {
         uint256 hashesRoot = b.loadRef(x);
         TonCells.Slice memory leaf = b.lookup(hashesRoot, uint32(workchain), 32);
         uint256 node = b.loadRef(leaf);
-        uint256 depth = 0;
-        for (;;) {
+        for (uint256 depth = 0; depth <= 60; depth++) {
             TonCells.Slice memory t = b.open(node);
             if (!b.loadBit(t)) {
                 uint256 tag = b.loadUint(t, 4);
@@ -186,10 +185,10 @@ library TonBlocks {
                 b.skip(t, 32 + 32 + 64 + 64);
                 return bytes32(b.loadUint(t, 256));
             }
-            if (depth >= 60) revert ShardNotFound();
+            if (depth == 60) break;
             node = b.ref(node, uint256(addr) >> (255 - depth) & 1);
-            depth++;
         }
+        revert ShardNotFound();
     }
 
     /// @notice From a shard (or masterchain) state, the hash of `addr`'s `Account` cell.
