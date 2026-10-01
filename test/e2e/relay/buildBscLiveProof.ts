@@ -26,14 +26,14 @@ import {deriveChannelSlots} from "./buildEthMainnetProof.js";
 ///     (absent there → MPT exclusion proofs → zeroed queue metadata, as in the Sepolia live test).
 ///
 /// CLI:
-///   npx tsx test/e2e/relay/buildBscLiveProof.ts [--network chapel|mainnet|botchain] [--vectors] summary from fixture
+///   npx tsx test/e2e/relay/buildBscLiveProof.ts [--network chapel|mainnet|botchain|core] [--vectors] summary from fixture
 ///                                                     (--vectors rewrites the Foundry hex vectors)
-///   npx tsx test/e2e/relay/buildBscLiveProof.ts --refresh [--network chapel|mainnet|botchain]  re-capture
+///   npx tsx test/e2e/relay/buildBscLiveProof.ts --refresh [--network chapel|mainnet|botchain|core]  re-capture
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const BSC_LIVE_DIR = path.resolve(__dirname, "../fixtures/bsc-live");
 
-export type BscNetwork = "chapel" | "mainnet" | "botchain";
+export type BscNetwork = "chapel" | "mainnet" | "botchain" | "core";
 
 export const NETWORKS: Record<BscNetwork, {chainId: bigint; rpcs: string[]; account: Hex; epochLength: bigint; lag?: number}> = {
     chapel: {
@@ -60,6 +60,15 @@ export const NETWORKS: Record<BscNetwork, {chainId: bigint; rpcs: string[]; acco
         rpcs: ["https://rpc.botchain.ai"],
         account: "0x0000000000000000000000000000000000001000",
         epochLength: 1000n
+    },
+    // Core (Satoshi Plus, coredao-org/core-chain): 200-block epochs, ~3 s blocks, turnLength 1.
+    // rpc.coredao.org prunes state after a few thousand blocks; drpc/ankr keep more.
+    core: {
+        chainId: 1116n,
+        rpcs: ["https://rpc.coredao.org", "https://core.drpc.org", "https://rpc.ankr.com/core"],
+        account: "0x40375C92d9FAf44d2f9db9Bd9ba41a3317a2404f", // WCORE
+        epochLength: 200n,
+        lag: 30
     }
 };
 
@@ -652,7 +661,7 @@ function summarize(p: BscLiveProof): string {
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
     const nIdx = args.indexOf("--network");
-    const networks: BscNetwork[] = nIdx >= 0 ? [args[nIdx + 1] as BscNetwork] : ["chapel", "mainnet", "botchain"];
+    const networks: BscNetwork[] = nIdx >= 0 ? [args[nIdx + 1] as BscNetwork] : ["chapel", "mainnet", "botchain", "core"];
     for (const network of networks) {
         let capture: BscLiveCapture;
         if (args.includes("--refresh")) {

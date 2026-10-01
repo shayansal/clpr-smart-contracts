@@ -8,7 +8,7 @@ import {ClprEvmBundleVerifier} from "@hiero-ledger/clpr/verifiers/evm/common/Clp
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 
 /// @dev BscParliaVerifier on REAL chain data: BSC testnet (Chapel, 9 validators), BSC mainnet
-///      (21 validators) and BOT Chain (7 validators), recorded by `npm run bsc-live:refresh` into test/e2e/fixtures/bsc-live/.
+///      (21 validators), BOT Chain (7 validators) and Core (20 validators), recorded by `npm run bsc-live:refresh` into test/e2e/fixtures/bsc-live/.
 ///      Each vector set covers verifyConfig on a real epoch block, a real epoch rotation (the next
 ///      epoch block finalized by the outgoing set's BLS attestation, with a changed validator set) and
 ///      a real finalized state header with its account/storage MPT proofs.
@@ -85,6 +85,22 @@ contract BscParliaLiveTest is Test {
     /// BOT Chain mainnet (chainId 677, 7 validators, turnLength 16, 1000-block epochs).
     function test_live_botchain() public {
         _checkNetwork("botchain", "eip155:677");
+    }
+
+    /// Core mainnet (chainId 1116, Satoshi Plus: 20 validators, turnLength 1, 200-block epochs).
+    function test_live_core() public {
+        _checkNetwork("core", "eip155:1116");
+    }
+
+    function test_live_revertWhen_coreAnchorWithBscEpochLength() public {
+        // Same real data, but an anchor claiming BSC's 1000-block epoch: the rotation header
+        // (block E + 200) is no longer the next epoch block.
+        Vectors memory v = _load("core");
+        bytes memory anchor = v.trustAnchor;
+        anchor[142] = bytes1(uint8(0x03));
+        anchor[143] = bytes1(uint8(0xe8));
+        vm.expectRevert();
+        verifier.verifyBundle(v.proofBytes, anchor, v.channelContext);
     }
 
     // ── Negative cases on real data ───────────────────────────────────────────

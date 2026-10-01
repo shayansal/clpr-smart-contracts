@@ -25,7 +25,7 @@ import {
 import {bigintToTrimmedBuf, hexToBuf} from "../../lib/rlp.js";
 
 /// BscParliaVerifier against REAL BNB Smart Chain data, replayed offline on anvil from
-/// test/e2e/fixtures/bsc-live/{chapel,mainnet,botchain}.json (re-capture: `npm run bsc-live:refresh`).
+/// test/e2e/fixtures/bsc-live/{chapel,mainnet,botchain,core}.json (re-capture: `npm run bsc-live:refresh`).
 ///
 /// Per network the fixture holds three consecutive epoch blocks, the real vote attestations that
 /// finalize the newest epoch block and a recent state block, and `eth_getProof` at that block. The
@@ -91,7 +91,7 @@ describe("BscParliaVerifier on live BSC data (fixture replay)", () => {
         anvil?.kill("SIGTERM");
     });
 
-    for (const network of ["chapel", "mainnet", "botchain"] as BscNetwork[]) {
+    for (const network of ["chapel", "mainnet", "botchain", "core"] as BscNetwork[]) {
         describe(network, () => {
             let capture: BscLiveCapture;
             let live: BscLiveProof;
