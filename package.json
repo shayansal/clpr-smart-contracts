@@ -19,6 +19,8 @@
     "cometbft-live:refresh": "tsx test/e2e/relay/buildCometBftLiveFixture.ts",
     "test:e2e:provenance-live": "vitest run test/e2e/tests/verifiers/provenance-live.spec.ts",
     "provenance-live:refresh": "tsx test/e2e/relay/buildProvenanceLiveFixture.ts",
+    "test:e2e:dydx-xclpr": "vitest run test/e2e/tests/verifiers/dydx-xclpr.spec.ts",
+    "dydx-xclpr:refresh": "tsx test/e2e/relay/buildDydxClprFixture.ts",
     "eth-live:refresh": "tsx test/e2e/relay/buildEthLiveProof.ts --refresh --wait-nonsigners 600",
     "test:e2e:sei-verifier": "CLPR_BACKEND=sei vitest run test/e2e/tests/verifiers/sei-verifier.spec.ts",
     "test:e2e:all": "npm run test:e2e:anvil && npm run test:e2e:besu",
