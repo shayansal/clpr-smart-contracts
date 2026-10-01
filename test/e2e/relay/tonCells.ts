@@ -259,7 +259,9 @@ export function serializeBoc(root: Cell): Buffer {
 
 /// Replace `cell` by a level-1 pruned branch (its level-0 hash and depth are preserved).
 export function prune(cell: Cell): Cell {
-    if (cell.levelMask !== 0) throw new Error("prune: only level-0 cells");
+    if (cell.type === CELL_PRUNED) return cell;
+    // A level-1 pruned branch carries the level-0 hash and depth, which is all a level-0 hash of the
+    // parent (what the verifier checks) needs, whatever the pruned cell's own level is.
     const data = Buffer.concat([Buffer.from([CELL_PRUNED, 1]), cell.hash(), Buffer.alloc(2)]);
     data.writeUInt16BE(cell.depthAt(0), 34);
     return new Cell(data, data.length * 8, [], true);
@@ -362,4 +364,24 @@ export function bufBits(b: Buffer): number[] {
     const out: number[] = [];
     for (const x of b) for (let i = 7; i >= 0; i--) out.push((x >> i) & 1);
     return out;
+}
+
+/// Union of two Merkle proofs of the same tree: wherever one side is a pruned branch and the other
+/// is not, keep the unpruned side.
+export function mergeProofs(a: Cell, b: Cell): Cell {
+    if (!a.hash().equals(b.hash())) throw new Error("merge: different trees");
+    if (a.type === CELL_PRUNED) return b;
+    if (b.type === CELL_PRUNED) return a;
+    if (a.refs.length !== b.refs.length) throw new Error("merge: shape");
+    const refs = a.refs.map((r, i) => mergeProofs(r, b.refs[i]));
+    return new Cell(a.data, a.bits, refs, a.exotic);
+}
+
+/// The proven tree of a MERKLE_PROOF root (or the cell itself).
+export const unwrapProof = (c: Cell): Cell => (c.type === CELL_MERKLE_PROOF ? c.refs[0] : c);
+
+/// Rebuild `root` keeping only the cells in `keep` (by identity); every other cell becomes a pruned branch.
+export function pruneExcept(root: Cell, keep: Set<Cell>): Cell {
+    const walk = (c: Cell): Cell => (keep.has(c) ? new Cell(c.data, c.bits, c.refs.map(walk), c.exotic) : prune(c));
+    return walk(root);
 }

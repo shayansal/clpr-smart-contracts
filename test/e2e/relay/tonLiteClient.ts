@@ -29,6 +29,7 @@ export const TL = {
     signatureSetSimplex: 0xac249800,
     signature: 0xa3def855,
     getAccountState: 0x6b890e25,
+    getAccountStatePrunned: 0x5a698507,
     accountState: 0x7079c751,
     accountId: 0x75a0e2c5,
     getConfigParams: 0x2a111c19,
@@ -442,11 +443,11 @@ export class LiteClient {
         id: BlockIdExt,
         workchain: number,
         account: Buffer,
+        prunned = false,
     ): Promise<{id: BlockIdExt; shardblk: BlockIdExt; shardProof: Buffer; proof: Buffer; state: Buffer}> {
         const q = new TlWriter()
-            .u32(TL.getAccountState)
-            .blockIdExt(id)
-            .u32(TL.accountId)
+            .u32(prunned ? TL.getAccountStatePrunned : TL.getAccountState)
+            .blockIdExt(id) // account:liteServer.accountId is a bare type: no constructor id
             .i32(workchain)
             .raw(account)
             .build();
