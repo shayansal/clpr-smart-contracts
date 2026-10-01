@@ -19,6 +19,7 @@
     "test:e2e:opstack-live": "vitest run test/e2e/tests/verifiers/opstack-live-base-sepolia.spec.ts",
     "opstack-live:refresh": "tsx test/e2e/relay/buildOpStackLiveProof.ts --refresh --wait-nonsigners 300",
     "test:e2e:opstack-live:xlayer": "vitest run test/e2e/tests/verifiers/opstack-live-xlayer.spec.ts",
+    "test:e2e:opstack-live:sweep51": "vitest run test/e2e/tests/verifiers/opstack-live-sweep51.spec.ts",
     "opstack-live:refresh:xlayer": "tsx test/e2e/relay/buildOpStackLiveProof.ts --chain xlayer --refresh",
     "opstack-live:stage:xlayer": "tsx test/e2e/relay/buildOpStackLiveProof.ts --chain xlayer --stage-next 2",
     "opstack:synthetic-fixture": "tsx test/e2e/relay/buildOpStackSyntheticFixture.ts",
