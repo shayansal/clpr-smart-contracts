@@ -25,6 +25,7 @@ import {
     MODE,
     OP_SUCCINCT_LITE_LAYOUT,
     outputRootPreimage,
+    PERMISSIONED_DISPUTE_GAME_V2_LAYOUT,
     ROOT_FORMAT,
     superRootPreimage,
     slotHex,
@@ -155,8 +156,19 @@ export const RISE = mainnetChain("rise", {
     layout: OP_SUCCINCT_LITE_LAYOUT
 });
 
+/// Ronin (chain 2020): PermissionedDisputeGame 2.4.0 (type 1), ASR 3.9.0 / DGF 1.6.1 with game args.
+/// api.roninchain.com does not whitelist eth_getProof.
+export const RONIN = mainnetChain("ronin", {
+    l2ChainId: 2020,
+    optimismPortal: "0x652CD53eCf9466E5Fb00D0E11d6CBf6469a56D77",
+    anchorStateRegistry: "0x0B95fF1d1B113bac3E29Ac0BBF2089126C9aE81A",
+    l2Rpcs: ["https://api.roninchain.com/rpc", "https://ronin.drpc.org"],
+    l2LatestProofRpcs: [],
+    layout: PERMISSIONED_DISPUTE_GAME_V2_LAYOUT
+});
+
 export const OPSTACK_LIVE_CHAINS: Record<string, OpStackLiveChain> = Object.fromEntries(
-    [BASE_SEPOLIA, XLAYER, RISE].map((c) => [c.name, c]));
+    [BASE_SEPOLIA, XLAYER, RISE, RONIN].map((c) => [c.name, c]));
 
 /// L2ToL1MessagePasser predeploy: a real contract with real code and storage on every OP Stack chain.
 export const L2_ACCOUNT: Hex = "0x4200000000000000000000000000000000000016";

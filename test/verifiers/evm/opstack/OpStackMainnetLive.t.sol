@@ -5,6 +5,7 @@ import {Test, console} from "forge-std/Test.sol";
 import {OpStackVerifier} from "@hiero-ledger/clpr/verifiers/evm/opstack/OpStackVerifier.sol";
 import {OpStackProposedVerifier} from "@hiero-ledger/clpr/verifiers/evm/opstack/OpStackProposedVerifier.sol";
 import {RiseProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/RiseProfile.sol";
+import {RoninProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/RoninProfile.sol";
 import {EthL1StateVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/EthL1StateVerifier.sol";
 import {ClprBeaconSsz} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconSsz.sol";
 import {OpStackOutputRootProof as OP} from "@hiero-ledger/clpr/libraries/proof/opstack/OpStackOutputRootProof.sol";
@@ -73,7 +74,7 @@ abstract contract OpStackMainnetLiveBase is Test {
     }
 
     /// @dev Verifies `key` on `v` and logs `21000 + calldata + execution` gas and the calldata size.
-    function _verifyAndLog(OpStackVerifier v, string memory key, string memory label) internal {
+    function _verifyAndLog(OpStackVerifier v, string memory key, string memory label) internal view {
         bytes memory proof = _proof(key);
         uint256 g = gasleft();
         (bytes32 root,,) = v.verifyL2StateRoot(proof, anchor);
@@ -211,5 +212,19 @@ contract OpStackRiseLiveTest is OpStackMainnetLiveBase {
 
     function _gameType() internal pure override returns (uint32) {
         return RiseProfile.GAME_TYPE;
+    }
+}
+
+contract OpStackRoninLiveTest is OpStackMainnetLiveBase {
+    function _fixtureName() internal pure override returns (string memory) {
+        return "ronin";
+    }
+
+    function _profile() internal pure override returns (OP.Profile memory) {
+        return RoninProfile.profile();
+    }
+
+    function _gameType() internal pure override returns (uint32) {
+        return RoninProfile.GAME_TYPE;
     }
 }
