@@ -161,7 +161,7 @@ Coverage depends on the settlement contracts, not on the brand. A chain is cover
 | **Blast** | `L2OutputOracle` 1.6.0 (portal 1.10.0, no ASR) | ✅ by the output-oracle verifier | See [oracle/README.md](./oracle/README.md). Live-verified on mainnet; 7-field L2 accounts. |
 | **Mantle** | `OPSuccinctL2OutputOracle` 2.0.1 (portal 1.7.0, no ASR) | ✅ by the output-oracle verifier | See [oracle/README.md](./oracle/README.md). Live-verified on mainnet. |
 | **Katana** | Polygon AggLayer, `AggchainFEP` 3.0.0 | ✅ by the output-oracle verifier | See [oracle/README.md](./oracle/README.md). Live-verified on mainnet. |
-| **X Layer** | Polygon AggLayer, `AggchainECDSAMultisig` (1-of-1 signer) | ❌ | No L2 state commitment reaches L1. See [oracle/README.md §9](./oracle/README.md#9-x-layer-chain-196-no-verifiable-path-from-l1-storage-to-its-l2-state-root). |
+| **X Layer** | OP Stack fault proofs: OPSuccinctFaultDisputeGame 2.0.0 (42), ASR 3.5.0; its AggLayer side (`AggchainECDSAMultisig`) stores no L2 state | ✅ (weaker) by this verifier | `OUTPUT_ROOT`, chain id 196. Profile and live mainnet data on `feat/xlayer-verifier`; see [oracle/README.md, X Layer](./oracle/README.md#x-layer). |
 
 Only Base Sepolia was exercised end to end in this work. For every other ✅ row, confirm the profile against the chain at deploy time with the same probe (`respectedGameType`, `gameImpls`, and Sourcify layouts). The live builder checks it off-chain against the chain.
 
