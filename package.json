@@ -18,6 +18,8 @@
     "eth-live:refresh": "tsx test/e2e/relay/buildEthLiveProof.ts --refresh --wait-nonsigners 600",
     "test:e2e:arbitrum-live": "vitest run test/e2e/tests/verifiers/arbitrum-live-sepolia.spec.ts",
     "arbitrum-live:refresh": "tsx test/e2e/relay/buildArbitrumLiveProof.ts --refresh --wait-nonsigners 300 --require-pending 45",
+    "test:e2e:plume-live": "vitest run test/e2e/tests/verifiers/plume-live.spec.ts",
+    "plume-live:refresh": "tsx test/e2e/relay/buildArbitrumLiveProof.ts --network plume --refresh",
     "test:e2e:sei-verifier": "CLPR_BACKEND=sei vitest run test/e2e/tests/verifiers/sei-verifier.spec.ts",
     "test:e2e:all": "npm run test:e2e:anvil && npm run test:e2e:besu",
     "test:e2e:avalanche": "CLPR_BACKEND=avalanche vitest run",

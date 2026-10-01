@@ -59,7 +59,7 @@ contract ArbitrumNitroVerifierLiveTest is Test {
     bytes[] internal items;
 
     function setUp() public {
-        json = vm.readFile(string.concat(vm.projectRoot(), "/test/verifiers/evm/arbitrum/fixtures/live.json"));
+        json = vm.readFile(string.concat(vm.projectRoot(), _fixture()));
         // Electra/Fulu beacon layout: execution state_root gindex 802 (depth 9), next_sync_committee 87 (depth 6).
         l1 = new EthL1StateVerifier(802, 9, 87, 6, 8192);
         verifier = new ArbitrumNitroVerifier(l1, _profile());
@@ -68,6 +68,11 @@ contract ArbitrumNitroVerifierLiveTest is Test {
         ctx = vm.parseJsonBytes(json, ".channelContext");
         bundle = vm.parseJsonBytes(json, ".confirmed.bundle");
         items = vm.parseJsonBytesArray(json, ".confirmed.items");
+    }
+
+    /// @dev The live fixture this suite replays; profile suites (Plume) override it.
+    function _fixture() internal pure virtual returns (string memory) {
+        return "/test/verifiers/evm/arbitrum/fixtures/live.json";
     }
 
     function _profile() internal view returns (AP.Profile memory p) {

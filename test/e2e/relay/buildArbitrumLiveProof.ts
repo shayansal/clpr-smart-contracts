@@ -38,7 +38,8 @@ import {
 } from "./arbitrum.js";
 
 /// Live-data proof builder for `ArbitrumNitroVerifier`, on Arbitrum Sepolia (BoLD) settling on
-/// Ethereum Sepolia.
+/// Ethereum Sepolia, and on the Plume mainnet profile (Arbitrum Orbit, AnyTrust, BoLD) settling on
+/// Ethereum mainnet (`--network plume`, fixture test/e2e/fixtures/plume-live/).
 ///
 /// Chain of real data:
 ///   Sepolia sync committee (finality_update, bootstrap) → attested execution block B
@@ -62,6 +63,7 @@ import {
 /// CLI:
 ///   npx tsx test/e2e/relay/buildArbitrumLiveProof.ts                     build from the fixture, print a summary
 ///   npx tsx test/e2e/relay/buildArbitrumLiveProof.ts --refresh [--wait-nonsigners SECS]
+///   npx tsx test/e2e/relay/buildArbitrumLiveProof.ts --network plume [--refresh]
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ARBITRUM_FIXTURE_DIR = path.resolve(__dirname, "../fixtures/arbitrum-live");
@@ -69,9 +71,27 @@ export const ARBITRUM_LIVE_FIXTURE = path.join(ARBITRUM_FIXTURE_DIR, "capture.js
 /// Foundry copy (hex items only), read by test/verifiers/evm/arbitrum/ArbitrumNitroVerifier.t.sol.
 export const ARBITRUM_FOUNDRY_FIXTURE = path.resolve(__dirname, "../../verifiers/evm/arbitrum/fixtures/live.json");
 
+/// One Nitro chain + its parent chain: where to read, what to prove, where the fixtures go.
+export interface ArbitrumLiveNetwork {
+    name: string;
+    l2ChainId: number;
+    rollup: Hex;
+    l1Rpcs: string[];
+    l2Rpcs: string[];
+    /// Beacon APIs of the parent chain (defaults to Sepolia's).
+    beaconApis?: string[];
+    /// L2 contract standing in for the ClprService (real code hash pinned, channel slots absent).
+    l2Account: Hex;
+    channelId: Hex;
+    fixture: string;
+    foundryFixture: string;
+    layout: typeof BOLD_LAYOUT;
+}
+
 /// Arbitrum Sepolia (chain 421614) on Ethereum Sepolia. Rollup address: Arbitrum docs, and on-chain
 /// `chainId()` == 421614.
-export const ARBITRUM_SEPOLIA = {
+export const ARBITRUM_SEPOLIA: ArbitrumLiveNetwork = {
+    name: "arbitrum-sepolia on sepolia",
     l2ChainId: 421614,
     rollup: "0x042B2E6C5E99d4c521bd49beeD5E99651D9B0Cf4" as Hex,
     l1Rpcs: [DEFAULT_EXECUTION_RPC, "https://ethereum-sepolia-rpc.publicnode.com",
@@ -80,11 +100,46 @@ export const ARBITRUM_SEPOLIA = {
     /// eth_getProof at the confirmed L2 block needs history: dRPC serves it; the others keep ~recent state.
     l2Rpcs: ["https://arbitrum-sepolia.drpc.org", "https://sepolia-rollup.arbitrum.io/rpc",
         "https://arbitrum-sepolia-rpc.publicnode.com"],
+    /// Arbitrum Sepolia WETH9 — real code and a large storage trie (realistic exclusion-proof depth).
+    l2Account: "0x980B62Da83eFf3D4576C647993b0c1D7faf17c73",
+    channelId: keccak256(toHex("clpr/arbitrum-live/arbitrum-sepolia")),
+    fixture: ARBITRUM_LIVE_FIXTURE,
+    foundryFixture: ARBITRUM_FOUNDRY_FIXTURE,
     layout: BOLD_LAYOUT
 };
-/// Arbitrum Sepolia WETH9 — real code and a large storage trie (realistic exclusion-proof depth).
-export const L2_ACCOUNT: Hex = "0x980B62Da83eFf3D4576C647993b0c1D7faf17c73";
-export const ARBITRUM_LIVE_CHANNEL_ID: Hex = keccak256(toHex("clpr/arbitrum-live/arbitrum-sepolia"));
+export const L2_ACCOUNT: Hex = ARBITRUM_SEPOLIA.l2Account;
+export const ARBITRUM_LIVE_CHANNEL_ID: Hex = ARBITRUM_SEPOLIA.channelId;
+
+/// Plume mainnet (chain 98866), an Arbitrum Orbit chain (AnyTrust, custom gas token PLUME) settling
+/// directly on Ethereum mainnet with BoLD rollup contracts. Checked live on 2026-10-01:
+///   - RollupProxy 0x4eD3…6eE8 (docs.plume.org contract list): `chainId()` 98866, `bridge()` = the
+///     documented Bridge 0x3538…EF83; slot 116 == `latestConfirmed()` (bytes32 assertion hash, BoLD),
+///     `_assertions[latestConfirmed]` (base 117) status byte 25 == Confirmed (2), as `getAssertion()`.
+///   - Logic (EIP-1967 primary / secondary slots): RollupAdminLogic 0x16ad…b724, RollupUserLogic
+///     0xa489…5451, the same BoLD logic as Reya.
+///   - `confirmPeriodBlocks` 40,320 (~5.6 days), `anyTrustFastConfirmer` 0x0,
+///     `validatorWhitelistDisabled` false with ONE whitelisted validator (see the README).
+/// rpc.plume.org keeps historical state: it served eth_getProof ~1.3M L2 blocks (~6 days) back.
+export const PLUME_MAINNET: ArbitrumLiveNetwork = {
+    name: "plume on ethereum mainnet",
+    l2ChainId: 98866,
+    rollup: "0x4eD3F488a5a4417839BbC39712EB76D8Aaee6eE8",
+    /// eth_getLogs + eth_getProof up to a sync period back (the rotation update's attested block).
+    l1Rpcs: ["https://eth.drpc.org", "https://rpc.mevblocker.io", "https://eth-mainnet.public.blastapi.io", "https://1rpc.io/eth"],
+    l2Rpcs: ["https://rpc.plume.org"],
+    beaconApis: ["https://ethereum-beacon-api.publicnode.com", "https://lodestar-mainnet.chainsafe.io"],
+    /// WPLUME (docs.plume.org: "Wrapped PLUME"), a WETH9-style contract with a large storage trie.
+    l2Account: "0xEa237441c92CAe6FC17Caaf9a7acB3f953be4bd1",
+    channelId: keccak256(toHex("clpr/arbitrum-live/plume")),
+    fixture: path.resolve(__dirname, "../fixtures/plume-live/capture.json"),
+    foundryFixture: path.resolve(__dirname, "../../verifiers/evm/arbitrum/fixtures/plume-live.json"),
+    layout: BOLD_LAYOUT
+};
+
+export const ARBITRUM_LIVE_NETWORKS: Record<string, ArbitrumLiveNetwork> = {
+    "arbitrum-sepolia": ARBITRUM_SEPOLIA,
+    plume: PLUME_MAINNET
+};
 
 const ASSERTION_CREATED_ABI = [{
     type: "event",
@@ -183,8 +238,8 @@ function hexBlock(n: bigint): Hex {
     return ("0x" + n.toString(16)) as Hex;
 }
 
-async function assertionAt(l1Rpcs: string[], l2Rpcs: string[], rollup: Hex, hash: Hex, node: Hex, parentFilter?: Hex):
-    Promise<AssertionCapture> {
+async function assertionAt(net: ArbitrumLiveNetwork, hash: Hex, node: Hex, parentFilter?: Hex): Promise<AssertionCapture> {
+    const {l1Rpcs, l2Rpcs, rollup} = net;
     const n = decodeAssertionNode(node);
     const createdAt = hexBlock(n.createdAtBlock);
     const topics: (Hex | null)[] = [ASSERTION_CREATED_TOPIC, hash];
@@ -213,7 +268,7 @@ async function assertionAt(l1Rpcs: string[], l2Rpcs: string[], rollup: Hex, hash
     for (let attempt = 0; attempt < 4 && !l2Proof; attempt++) {
         try {
             ({result: l2Proof} = await firstOk<GetProof>(l2Rpcs, "eth_getProof",
-                [L2_ACCOUNT, deriveChannelSlots(ARBITRUM_LIVE_CHANNEL_ID), l2Header.number]));
+                [net.l2Account, deriveChannelSlots(net.channelId), l2Header.number]));
         } catch (err) {
             if (attempt === 3) console.warn(`L2 eth_getProof at #${BigInt(l2Header.number)} unavailable: ${String(err).slice(0, 160)}`);
             else await new Promise((r) => setTimeout(r, 3_000));
@@ -244,14 +299,15 @@ function forged(a: AssertionCapture): {preimage: Hex; hash: Hex} {
 }
 
 /// Every rollup read at one L1 block.
-async function captureL1(l1Rpcs: string[], l2Rpcs: string[], rollup: Hex, blockTag: Hex): Promise<L1Capture> {
+async function captureL1(net: ArbitrumLiveNetwork, blockTag: Hex): Promise<L1Capture> {
+    const {l1Rpcs, rollup} = net;
     const base = [EIP1967_IMPLEMENTATION_SLOT, IMPLEMENTATION_SECONDARY_SLOT, slotHex(LATEST_CONFIRMED_SLOT)];
     const {result: p0} = await firstOk<GetProof>(l1Rpcs, "eth_getProof", [rollup, base, blockTag]);
     const latest = slotHex(BigInt(p0.storageProof[2].value));
     const {result: p1} = await firstOk<GetProof>(l1Rpcs, "eth_getProof", [rollup, [assertionSlot(latest)], blockTag]);
     const latestNode = slotHex(BigInt(p1.storageProof[0].value));
     if (decodeAssertionNode(latestNode).status !== ASSERTION_STATUS.CONFIRMED) throw new Error("latestConfirmed not Confirmed?");
-    const confirmed = await assertionAt(l1Rpcs, l2Rpcs, rollup, latest, latestNode);
+    const confirmed = await assertionAt(net, latest, latestNode);
 
     // The first child (if any) is Pending at this block: newer than the latest confirmed.
     let pending: AssertionCapture | null = null;
@@ -263,7 +319,7 @@ async function captureL1(l1Rpcs: string[], l2Rpcs: string[], rollup: Hex, blockT
         if (logs.length > 0) {
             const child = logs[0].topics[1];
             const {result: pc} = await firstOk<GetProof>(l1Rpcs, "eth_getProof", [rollup, [assertionSlot(child)], blockTag]);
-            pending = await assertionAt(l1Rpcs, l2Rpcs, rollup, child, slotHex(BigInt(pc.storageProof[0].value)), latest);
+            pending = await assertionAt(net, child, slotHex(BigInt(pc.storageProof[0].value)), latest);
         }
     }
 
@@ -276,20 +332,24 @@ async function captureL1(l1Rpcs: string[], l2Rpcs: string[], rollup: Hex, blockT
 }
 
 export async function captureArbitrumSepoliaLive(opts: {waitForNonSignersMs?: number} = {}): Promise<ArbitrumLiveCapture> {
-    const c = ARBITRUM_SEPOLIA;
-    const {beacon, extra: l1} = await captureBeaconLive(opts, (_execution, blockTag) =>
-        captureL1(c.l1Rpcs, c.l2Rpcs, c.rollup, blockTag));
+    return captureArbitrumLive(ARBITRUM_SEPOLIA, opts);
+}
+
+export async function captureArbitrumLive(c: ArbitrumLiveNetwork, opts: {waitForNonSignersMs?: number} = {}):
+    Promise<ArbitrumLiveCapture> {
+    const {beacon, extra: l1} = await captureBeaconLive({...opts, beaconApis: c.beaconApis}, (_execution, blockTag) =>
+        captureL1(c, blockTag));
     let rotation: L1Capture | null = null;
     const ru = beacon.rotationUpdate;
     if (ru) {
         try {
-            rotation = await captureL1(c.l1Rpcs, c.l2Rpcs, c.rollup, hexBlock(BigInt(ru.data.attested_header.execution.block_number)));
+            rotation = await captureL1(c, hexBlock(BigInt(ru.data.attested_header.execution.block_number)));
         } catch (err) {
             console.warn(`rotation-block capture skipped: ${String(err).slice(0, 200)}`);
         }
     }
     return {
-        network: "arbitrum-sepolia on sepolia",
+        network: c.name,
         capturedAt: new Date().toISOString(),
         sources: {beaconApi: beacon.sources.beaconApi, l1Rpc: c.l1Rpcs.join(" | "), l2Rpc: c.l2Rpcs.join(" | ")},
         beacon,
@@ -388,18 +448,19 @@ function rotationLightClient(beacon: BeaconCapture): {lc: LiveLightClient; proof
 }
 
 /// Pure/offline: the capture → verifier inputs, cross-checking every link.
-export function buildArbitrumLiveProof(c: ArbitrumLiveCapture): ArbitrumLiveProof {
+export function buildArbitrumLiveProof(c: ArbitrumLiveCapture, net: ArbitrumLiveNetwork = ARBITRUM_SEPOLIA): ArbitrumLiveProof {
+    if (c.network !== net.name) throw new Error(`capture is for "${c.network}", not "${net.name}"`);
     const lightClient = buildLiveLightClient(c.beacon);
     const exec = c.beacon.finalityUpdate.data.attested_header.execution;
     checkL1(c.l1, exec.state_root, exec.block_number);
     const p = c.l1.rollupProof;
     const profile: ArbitrumProfile = {
-        rollup: ARBITRUM_SEPOLIA.rollup,
+        rollup: net.rollup,
         rollupAdminLogic: slotHex(BigInt(p.storageProof[0].value)).replace(/^0x0{24}/, "0x") as Hex,
         rollupUserLogic: slotHex(BigInt(p.storageProof[1].value)).replace(/^0x0{24}/, "0x") as Hex,
-        layout: BOLD_LAYOUT
+        layout: net.layout
     };
-    const channelId = ARBITRUM_LIVE_CHANNEL_ID;
+    const channelId = net.channelId;
     const slots = deriveChannelSlots(channelId);
     const lcProof = lightClient.lightClientProof;
     const confirmed = assertionCase(c.l1.confirmed, c.l1, lcProof, slots);
@@ -430,9 +491,9 @@ export function buildArbitrumLiveProof(c: ArbitrumLiveCapture): ArbitrumLiveProo
         attestedSlot: BigInt(c.beacon.finalityUpdate.data.attested_header.beacon.slot),
         profile,
         trustAnchor,
-        channelContext: (channelId + L2_ACCOUNT.slice(2).toLowerCase()) as Hex,
+        channelContext: (channelId + net.l2Account.slice(2).toLowerCase()) as Hex,
         channelId,
-        l2Account: L2_ACCOUNT,
+        l2Account: net.l2Account,
         l2CodeHash,
         confirmed,
         pending,
@@ -491,6 +552,10 @@ export function loadArbitrumLiveCapture(file = ARBITRUM_LIVE_FIXTURE): ArbitrumL
     return JSON.parse(readFileSync(file, "utf8")) as ArbitrumLiveCapture;
 }
 
+export function loadArbitrumLiveCaptureFor(net: ArbitrumLiveNetwork): ArbitrumLiveCapture {
+    return loadArbitrumLiveCapture(net.fixture);
+}
+
 function summarize(p: ArbitrumLiveProof): string {
     const a = (x: AssertionCase) => `${x.assertionHash.slice(0, 18)}… status ${x.status} L2 #${x.l2BlockNumber} ` +
         `${x.bundle ? `full bundle ${(x.bundle.proofBytes.length - 2) / 2} B` : "to L2 state root"}`;
@@ -505,6 +570,9 @@ function summarize(p: ArbitrumLiveProof): string {
 
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
+    const netIdx = args.indexOf("--network");
+    const net = ARBITRUM_LIVE_NETWORKS[netIdx >= 0 ? args[netIdx + 1] : "arbitrum-sepolia"];
+    if (!net) throw new Error(`unknown --network; one of ${Object.keys(ARBITRUM_LIVE_NETWORKS).join(", ")}`);
     let capture!: ArbitrumLiveCapture;
     if (args.includes("--refresh")) {
         const waitIdx = args.indexOf("--wait-nonsigners");
@@ -514,22 +582,28 @@ async function main(): Promise<void> {
         const pendIdx = args.indexOf("--require-pending");
         const pendDeadline = Date.now() + (pendIdx >= 0 ? Number(args[pendIdx + 1]) * 60_000 : 0);
         for (;;) {
-            capture = await captureArbitrumSepoliaLive({waitForNonSignersMs: waitIdx >= 0 ? Number(args[waitIdx + 1]) * 1000 : 0});
+            capture = await captureArbitrumLive(net, {waitForNonSignersMs: waitIdx >= 0 ? Number(args[waitIdx + 1]) * 1000 : 0});
+            // A finality update below 2/3 participation (seen once on mainnet: 315/512) cannot verify: take the next.
+            const participants = buildLiveLightClient(capture.beacon).signed.participants;
+            if (3 * participants < 2 * 512) {
+                console.log(`participation ${participants}/512 is below 2/3: re-capturing`);
+                continue;
+            }
             const hasPending = capture.l1.pending !== null || (capture.rotation?.pending ?? null) !== null;
             if ((hasPending && capture.l1.confirmed.l2Proof) || Date.now() > pendDeadline) break;
             console.log(`retrying in 60 s (pending: ${hasPending}, confirmed L2 proof: ${capture.l1.confirmed.l2Proof !== null})`);
             await new Promise((r) => setTimeout(r, 60_000));
         }
-        buildArbitrumLiveProof(capture); // validate before writing
-        mkdirSync(ARBITRUM_FIXTURE_DIR, {recursive: true});
-        writeFileSync(ARBITRUM_LIVE_FIXTURE, JSON.stringify(capture, null, 1) + "\n");
-        console.log(`captured → ${path.relative(process.cwd(), ARBITRUM_LIVE_FIXTURE)}`);
+        buildArbitrumLiveProof(capture, net); // validate before writing
+        mkdirSync(path.dirname(net.fixture), {recursive: true});
+        writeFileSync(net.fixture, JSON.stringify(capture, null, 1) + "\n");
+        console.log(`captured → ${path.relative(process.cwd(), net.fixture)}`);
     } else {
-        capture = loadArbitrumLiveCapture();
+        capture = loadArbitrumLiveCaptureFor(net);
     }
-    const built = buildArbitrumLiveProof(capture);
-    mkdirSync(path.dirname(ARBITRUM_FOUNDRY_FIXTURE), {recursive: true});
-    writeFileSync(ARBITRUM_FOUNDRY_FIXTURE, JSON.stringify(foundryFixture(built), null, 1) + "\n");
+    const built = buildArbitrumLiveProof(capture, net);
+    mkdirSync(path.dirname(net.foundryFixture), {recursive: true});
+    writeFileSync(net.foundryFixture, JSON.stringify(foundryFixture(built), null, 1) + "\n");
     console.log(summarize(built));
 }
 
