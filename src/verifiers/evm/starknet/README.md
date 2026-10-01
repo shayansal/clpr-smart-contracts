@@ -165,6 +165,28 @@ npm run starknet-live:refresh   # waits for L1 to post a staged block, captures 
 npm run test:e2e:starknet-live  # replays test/e2e/fixtures/starknet-sepolia-live/capture.json on anvil
 ```
 
+### Live-data status (2026-10-01)
+
+Verified on live data:
+- **L1 half, end to end on anvil**: the real Sepolia sync committee (487/512, real non-signer proofs) →
+  attested execution state root → the core contract's `globalRoot`/`blockNumber`, implementation code
+  hash and pinned program hashes → `verifyStarknetState` returned Starknet block 15896215 and root
+  `0x2908c7b5…0397`, equal to that block's `new_root` from the Starknet RPC. 2.55M gas (eth_estimateGas).
+- **Starknet half**: a real `starknet_getStorageProof` (block 15900215, STRK token, 23 contract + 41
+  storage nodes) verifies in `StarknetStateProver` (Foundry `test_live_sepoliaStorageProof`, 4.87M gas):
+  global root formula, contract leaf, Pedersen node hashes, membership (total supply) and non-membership.
+
+Not yet verified together: one capture where the L1 half and the Starknet half meet at the same block.
+Starknet Sepolia's core contract stayed at block 15896215 for 2+ hours during this work, before the
+staged blocks. Staged and committed: `pending/15901215.json`, `15902215.json`, `15903215.json` (storage
+proofs with the live channel keys + total supply). Running `npm run starknet-live:refresh` once L1 posts
+any of them (and `starknet-live:stage` to keep staging later ones) writes `capture.json`, which adds:
+the full live `verifyBundle` (real BLS → core contract → Starknet non-membership proofs for the 8
+channel keys), its gas/calldata against the Hedera limits, and the live rejection cases in
+`starknet-live-sepolia.spec.ts` (class-hash pin, other channel, implementation pin, program-hash pin,
+Electra fork version). The spec skips until that file exists. Staged proofs only stay useful while they
+are ahead of L1; if L1 passes them unposted, stage new ones.
+
 The live stand-in is the STRK token (no ClprService exists on Starknet Sepolia): its real class hash is
 pinned, the CLPR keys are proven absent and the ERC-20 total supply is proven present.
 

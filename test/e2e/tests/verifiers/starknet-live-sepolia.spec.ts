@@ -1,6 +1,6 @@
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
 import {spawn, type ChildProcess} from "node:child_process";
-import {readFileSync} from "node:fs";
+import {existsSync, readFileSync} from "node:fs";
 import path from "node:path";
 import {
     createPublicClient,
@@ -19,6 +19,7 @@ import {
     buildStarknetLiveProof,
     loadStarknetLiveCapture,
     STARKNET_LIVE_CHANNEL_ID,
+    STARKNET_LIVE_FIXTURE,
     STARKNET_SEPOLIA,
     type StarknetLiveCapture,
     type StarknetLiveProof
@@ -58,7 +59,9 @@ function tableArtifact(name: string): {abi: readonly unknown[]; bytecode: Hex} {
     return {abi: j.abi, bytecode: j.bytecode.object};
 }
 
-describe("StarknetVerifier on live Starknet Sepolia data (fixture replay)", () => {
+// capture.json exists only after a refresh that caught the core contract at a staged block (see the
+// README, "Relaying and live data"); until then the spec is skipped, not failed.
+describe.skipIf(!existsSync(STARKNET_LIVE_FIXTURE))("StarknetVerifier on live Starknet Sepolia data (fixture replay)", () => {
     let anvil: ChildProcess;
     let pub: PublicClient;
     let wallet: WalletClient;
