@@ -14,6 +14,34 @@ commits and store proofs end to end (results in that README §1).
 | Module | `x/clpr`: keeper, msg server, genesis, CLI, protos in `proto/clpr/v1` (generated with `ghcr.io/cosmos/proto-builder:0.14.0`, `scripts/protocgen.sh`) |
 | Test chain | `app/` + `cmd/clprd`: auth, bank, staking, genutil, consensus, clpr. Bech32 prefix `dydx`. It is not dYdX's app; it reuses dYdX's SDK, store and consensus code, which is what produces the proofs |
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Chain["Cosmos SDK app: dYdX, or the clprd test chain"]
+        TX["Tx: MsgOpenChannel, MsgSendMessage,<br/>MsgUpdateManifest"] --> MS["msgServer<br/>keeper/msg_server.go"]
+        GOV["x/gov authority"] -->|"MsgUpdateManifest"| MS
+        MS --> K["Keeper<br/>OpenChannel, Enqueue, UpdateManifest"]
+        K --> ST[("IAVL store 'clpr'<br/>0x01 queue record<br/>0x02 messages<br/>0x03 service item<br/>0x04 channels, 0x05 params")]
+        K --> EV["event clpr_message_queued"]
+        ST --> AH["app_hash in the next header"]
+    end
+    subgraph Off["Off chain"]
+        RL["Relayer<br/>/commit, /validators,<br/>abci_query /store/clpr/key"]
+    end
+    subgraph Hedera["Hedera EVM"]
+        SV["ClprService.submitBundle"] --> VF["CosmosModuleVerifier"]
+        VF --> AC["CometBftCommitAccumulator"]
+    end
+    EV --> RL
+    AH --> RL
+    RL --> SV
+```
+
+The keeper is the only writer of the `clpr` store. Every change to a channel's queue rewrites its
+90-byte record at `0x01 ‖ channel_id`, which is the one entry a bundle proves; message values at
+`0x02` are proven only on demand (`verifyQueueMessage`). The module has no Begin/EndBlocker.
+
 ## 1. State and keys
 
 Store key `clpr`. Every key has a fixed length within its prefix, so absence of any channel or
@@ -75,6 +103,19 @@ dYdX ships protocol changes as a coordinated **software upgrade** through `x/gov
 
 So the shortest on-chain path is about 4 days (1 day deposit + 3 days voting), or about 2.5 days
 expedited. The real lead time is the code review and release cycle before that.
+
+```mermaid
+flowchart LR
+    A["Forum post + code review<br/>dydxprotocol/v4-chain"] --> B["Tagged protocol release<br/>module + upgrade handler"]
+    B --> C["MsgSoftwareUpgrade proposal<br/>plan name + height"]
+    C -->|"deposit: min 2,000 DYDX, 1 day"| D["Voting period<br/>3 days, or 1.5 days expedited"]
+    D -->|"quorum 50%, threshold 50%, veto 33.4%"| E["Passed"]
+    D -->|"fails or vetoed"| X["Rejected; a veto burns the deposit"]
+    E --> F["Plan height: old binary halts"]
+    F --> G["21 validators switch binary<br/>(Cosmovisor)"]
+    G --> H["Store loader mounts 'clpr'<br/>RunMigrations runs InitGenesis"]
+    H --> I["x/clpr live on dydx-mainnet-1"]
+```
 
 ### 4.2 Code changes in dydxprotocol/v4-chain (protocol/)
 

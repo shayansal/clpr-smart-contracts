@@ -155,8 +155,8 @@ The ICS-23 proofs are the `ics23:iavl` and `ics23:simple` ops that `abci_query
   verifier does not compare header time to `block.timestamp`. Adding that check would need a
   profile parameter.
 - **Bootstrap.** `verifyConfig` trusts the deploy-time checkpoint, so the deployer chooses it. A
-  checkpoint older than the unbonding period has the same exposure as above. Unlike
-  `SeiCometBftVerifier`, a config proof **cannot** supply its own validator set.
+  checkpoint older than the unbonding period has the same exposure as above. A config proof
+  cannot supply its own validator set.
 - **Peer identity.** The service address is bound by channel context and proven storage, as in
   the other EVM verifiers. Peer authenticity comes from ClprService's commitment/reveal.
 - **ICS-23 checks** come from `Ics23Lib`, shared with Sei: leaf and inner-op spec checks, plus
