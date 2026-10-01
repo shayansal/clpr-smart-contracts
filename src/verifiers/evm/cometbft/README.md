@@ -35,7 +35,9 @@ branch `feat/dydx-xclpr`). One page per chain is in [docs/chains](../../../../do
 | MANTRA | 0.38.22 (node) | Ed25519 | 38 | 8 | store `evm`, key `0x02‖addr‖slot` (cosmos/evm v0.6, MANTRA fork) | live-verified |
 | Injective | v1.0.1 (InjectiveLabs fork, source private) | Ed25519 | 45 | 15 | store `evm`, key `0x02‖addr‖slot` (Injective `x/evm`) | live-verified |
 | Sei | sei-tendermint | Ed25519 | not recorded | not recorded | store `evm`, key `0x03‖addr‖slot` | family-covered |
-| Stable, Kava, 0G | not recorded | not recorded | not recorded | not recorded | not recorded | in progress |
+| Kava | 0.37.16 | Ed25519 | 50 | 7 | store `evm`, key `0x02‖addr‖slot` (Ethermint) | live-verified |
+| Stable | StableBFT (CometBFT-based) | not checked | not checked | not checked | store `evm`, key `0x02‖addr‖slot`, confirmed via `eth_getProof` | in progress: no public CometBFT RPC |
+| 0G | CometBFT + Reth | not checked | not checked | not checked | EVM state in Reth's MPT, not IAVL: no profile fits | blocked: needs a new adapter |
 
 "Signers for > 2/3" uses the live validator set sorted by power. The relay sends exactly that many
 signatures (§2, step 4).
