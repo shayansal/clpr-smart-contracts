@@ -11,14 +11,14 @@ confirmations of valid proof of work, and builds the queue metadata itself.
 
 | Item | Value |
 |---|---|
-| Chains covered | Bitcoin mainnet (`bip122:000000000019d6689c085ae165831e93`), Bitcoin Core regtest. Per-chain page: [`docs/chains/bitcoin.md`](../../../docs/chains/bitcoin.md) |
+| Chains covered | Bitcoin mainnet (`bip122:000000000019d6689c085ae165831e93`), Bitcoin Core regtest; Bitcoin Cash mainnet (`bip122:000000000000000000651ef99cb9fcbe`) through the `BitcoinCashVerifier` profile (ASERT difficulty). Per-chain pages: [`docs/chains/bitcoin.md`](../../../docs/chains/bitcoin.md), [`docs/chains/bitcoin-cash.md`](../../../docs/chains/bitcoin-cash.md) |
 | Direction | Bitcoin → Hiero only. Needs the receive-only peer channel mode (see below) before production |
 | Finality source | Proof of work: the message block has at least `k` confirmations (constructor parameter, e.g. 6) |
 | Trust (one line) | No reorg deeper than `k` (SPV assumption); the deployment checkpoint is canonical |
 | Typical bundle | 6 headers + 3 segwit messages: 192,050 gas (`eth_estimateGas`, real regtest), 3,972 B calldata |
 | Rotation | None: there is no validator set. The checkpoint advances with each bundle at no extra cost |
-| Contract size | `BitcoinVerifier` runtime 13,471 B (11,105 B under EIP-170) |
-| Status | Prototype. Header, retarget and transaction rules verified on real mainnet data (fixtures fetched 2026-10-01); end to end on a real `bitcoind -regtest` chain on anvil |
+| Contract size | `BitcoinVerifier` runtime 13,471 B (11,105 B under EIP-170); `BitcoinCashVerifier` 14,097 B (10,479 B under) |
+| Status | Prototype. Header, retarget and transaction rules verified on real mainnet data (fixtures fetched 2026-10-01); end to end on a real `bitcoind -regtest` chain on anvil. Bitcoin Cash: headers (ASERT, PoW) and a transaction verified on real mainnet data (2026-10-01), replayed on anvil |
 
 ## How it works
 
@@ -26,7 +26,7 @@ confirmations of valid proof of work, and builds the queue metadata itself.
 flowchart TD
     A["Trust anchor: checkpoint (hash, height, work, bits, times),<br/>cursor outpoint, lastMessageId, runningHash, k"] -->|"headers start at checkpoint+1, or at or below it<br/>and contain the checkpoint header"| B["80-byte header chain"]
     B -->|"prevHash links; above the checkpoint:<br/>hash256 at most target(nBits), target at most powLimit"| C["Valid PoW chain"]
-    C -->|"nBits unchanged inside a period;<br/>at a 2016 boundary = CalculateNextWorkRequired"| D["Difficulty checked"]
+    C -->|"nBits unchanged inside a period;<br/>at a 2016 boundary = CalculateNextWorkRequired;<br/>Bitcoin Cash: every block = ASERT"| D["Difficulty checked"]
     D -->|"final = max(checkpoint, tip - k + 1)"| E["Blocks with k confirmations"]
     E -->|"double-SHA256 Merkle branch from the txid<br/>(non-witness serialization) to merkleRoot"| F["Message transaction"]
     F -->|"input 0 spends the anchor cursor; vout 1 pays the sender script"| G["Queue position"]
@@ -40,7 +40,8 @@ flowchart TD
 1. `BitcoinVerifier.sol:_decodeTrustAnchor` reads the ABI-encoded anchor (352 bytes).
 2. `BitcoinVerifier.sol:_verifyChain` checks the header chain against the checkpoint: parent links, and for headers
    above the checkpoint `_checkWork` checks the proof of work and the difficulty bits with `BitcoinLib` (compact
-   targets, `CalculateNextWorkRequired`, chainwork). It returns the Merkle roots and the final height.
+   targets, `CalculateNextWorkRequired`, chainwork). `BitcoinCashVerifier.sol:_checkWork` overrides it for Bitcoin
+   Cash: every header's nBits must equal `BitcoinLib.asertBits` (BCHN `GetNextASERTWorkRequired`). It returns the Merkle roots and the final height.
 3. `BitcoinVerifier.sol:_verifyClprTx` checks each message: the Merkle branch, that the transaction is not the
    coinbase and not 64 bytes long, that input 0 spends the cursor, and that vout 1 still pays the sender script.
 4. `BitcoinVerifier.sol:_parseCommitment` reads the `OP_RETURN` commitment, the channel tag and the message id.
@@ -152,7 +153,9 @@ returns the constructor's CAIP-2 id, the genesis block time as `peerConfigNanos`
 
 Constructor (per deployment): `powLimit`, `noRetargeting`, `allowMinDifficulty` (only with `noRetargeting`),
 `confirmations` (`k`), `maxPayloadBytes` (must not exceed the local `maxMessagePayloadBytes` throttle),
-`caip2ChainId`, and the deployment `checkpoint`.
+`caip2ChainId`, and the deployment `checkpoint`. `BitcoinCashVerifier` takes `powLimit`, `confirmations`,
+`maxPayloadBytes`, `caip2ChainId`, `checkpoint` (at or above the ASERT anchor height), the ASERT anchor
+`{height, bits, prevBlockTime}` and the half-life; under ASERT `checkpoint.periodStartTime` is unused (0).
 
 ### Rules not checked (by design)
 
@@ -176,7 +179,8 @@ behind the checkpoint stays provable. Each block of lag costs 80 bytes: about 1,
 
 Hedera limits: 15M gas and 128 KB calldata. Foundry figures are `verifyBundle` execution gas on synthetic regtest
 chains (`BitcoinVerifierRegtest.t.sol`). Anvil figures are `eth_estimateGas` on a real `bitcoind -regtest` chain
-(`bitcoin-verifier.spec.ts`, run on 2026-10-01) and include the 21k base and calldata cost. They vary by a few hundred
+(`bitcoin-verifier.spec.ts`, run on 2026-10-01) and include the 21k base and calldata cost. Bitcoin Cash rows come
+from `BitcoinCashMainnet.t.sol` and `bitcoin-cash-live.spec.ts` on the 2026-10-01 fixture. They vary by a few hundred
 gas between runs, because each run creates new transactions.
 
 | Scenario | Foundry execution gas | Anvil `eth_estimateGas` | Calldata |
@@ -185,6 +189,8 @@ gas between runs, because each run creates new transactions.
 | 7 headers + 3 messages (config + bundle test) | – | 191,895 | 4,132 B |
 | 12 headers + 3 segwit messages | 162,283 | 235,605 | 4,068 B (Foundry), 4,452 B (anvil) |
 | 1,000 headers + 3 messages (synthetic) | 6,377,768 | – | 83,108 B |
+| Bitcoin Cash, 6 real mainnet headers, no messages | 83,000 | 105,368 | 672 B proof, 1,284 B calldata |
+| Bitcoin Cash, 144 real mainnet headers (one day), no messages | 1,530,371 | 1,711,498 | 11,712 B proof, 12,324 B calldata |
 
 A normal bundle uses about 1.5% of the gas limit and about 3.5% of the calldata limit.
 
@@ -206,7 +212,8 @@ A normal bundle uses about 1.5% of the gas limit and about 3.5% of the calldata 
   or a sender who never publishes a preimage, halts the channel; it must then be closed and re-created. Only the
   channel's own sender can cause this, so sender tooling must validate before broadcasting.
 - **Networks:** mainnet and regtest only. testnet3, testnet4 and signet are not implemented (signet needs
-  block-signature validation).
+  block-signature validation). Bitcoin Cash: mainnet only; its testnets (minimum-difficulty rule) are not supported.
+  No CLPR message has been sent on Bitcoin Cash; its message path is the same code as Bitcoin's.
 - No `IClprVerifier` compliance suite runs against this verifier yet; the integration test runs it against an
   unmodified ClprService.
 
@@ -251,7 +258,8 @@ Proposed change (not implemented; `ClprService` and `BundleLogic` are untouched)
   verifier ADR
   ([`ADR/2026-10-01-fork-aware-verifiers.md`](https://github.com/shayansal/clpr-spec/blob/adr/fork-handling/ADR/2026-10-01-fork-aware-verifiers.md),
   draft PR [LFDT-CLPR/clpr-spec#1](https://github.com/LFDT-CLPR/clpr-spec/pull/1)) a difficulty-rule change is
-  Class B and a proof-of-work change is Class C.
+  Class B and a proof-of-work change is Class C. Bitcoin Cash's ASERT rule is handled as a separate profile
+  contract (`BitcoinCashVerifier`), deployed with a checkpoint after the ASERT anchor block.
 - **Chain splits** are outside the ADR: a split keeps both chains valid under the same rules. The verifier follows
   whatever chain the relayer shows it from the checkpoint, so the deployment checkpoint and `k` decide which chain a
   channel follows.
@@ -271,23 +279,32 @@ npm run test:e2e:bitcoin-verifier
 
 # Re-fetch the mainnet fixtures from the Blockstream Esplora API (optional)
 npx tsx test/verifiers/bitcoin/fixtures/fetch-mainnet.ts
+
+# Bitcoin Cash: replay the live mainnet fixture on anvil, and refresh it from Electrum Cash servers
+npm run test:e2e:bitcoin-cash-live
+npm run bitcoin-cash-live:refresh
 ```
 
-Test counts on this branch: 20 mainnet-fixture, 35 regtest-chain and 3 integration tests (Foundry), 2 anvil tests
-against a real `bitcoind`.
+Test counts on this branch: 20 mainnet-fixture, 35 regtest-chain, 18 Bitcoin Cash and 3 integration tests (Foundry),
+2 anvil tests against a real `bitcoind`, 5 anvil tests replaying Bitcoin Cash mainnet headers.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `src/verifiers/bitcoin/BitcoinVerifier.sol` | `verifyConfig`, `verifyBundle`, trust anchor, message and cursor rules |
-| `src/verifiers/bitcoin/BitcoinLib.sol` | Headers, compact targets, retarget, chainwork, Merkle branches, transaction parsing |
+| `src/verifiers/bitcoin/BitcoinLib.sol` | Headers, compact targets, retarget, ASERT, chainwork, Merkle branches, transaction parsing |
+| `src/verifiers/bitcoin/BitcoinCashVerifier.sol` | Bitcoin Cash profile: ASERT difficulty check in place of the 2016-block retarget |
 | `test/verifiers/bitcoin/BitcoinMainnet.t.sol` | Real mainnet headers around three retargets and real legacy and segwit transactions |
 | `test/verifiers/bitcoin/BitcoinVerifierRegtest.t.sol` | Synthetic regtest chains, negative cases and gas |
 | `test/verifiers/bitcoin/BitcoinTestBuilder.sol` | Builds synthetic headers, transactions and proofs |
 | `test/verifiers/bitcoin/fixtures/mainnet-{2016,32256,967680}.json` | Mainnet headers around each retarget boundary |
 | `test/verifiers/bitcoin/fixtures/mainnet-tx-{legacy,segwit}.json` | Real transactions with Merkle branches |
 | `test/verifiers/bitcoin/fixtures/fetch-mainnet.ts` | Re-fetches the mainnet fixtures |
+| `test/verifiers/bitcoin/BitcoinCashMainnet.t.sol` | Bitcoin Cash: real headers and transaction, BCHN ASERT vectors, negative cases, gas |
+| `test/e2e/fixtures/bitcoin-cash-live/*.json` | Bitcoin Cash mainnet headers (ASERT activation, recent) and a real transaction |
+| `test/e2e/relay/fetchBitcoinCashLive.ts` | Refreshes the Bitcoin Cash fixtures from Electrum Cash servers |
+| `test/e2e/tests/verifiers/bitcoin-cash-live.spec.ts` | Anvil replay of the Bitcoin Cash fixture |
 | `test/integration/IntegrationBitcoin.t.sol` | Unmodified ClprService with this verifier; receive-only gaps |
 | `test/e2e/relay/buildBitcoinProof.ts` | Relayer: builds config and bundle proofs from Bitcoin Core RPC |
 | `test/e2e/tests/verifiers/bitcoin-verifier.spec.ts` | Real `bitcoind -regtest` → anvil |
@@ -296,6 +313,9 @@ against a real `bitcoind`.
 
 - Bitcoin Core source (`pow.cpp` `CalculateNextWorkRequired`, `consensus/merkle.cpp`, `validation.cpp`, policy
   `datacarriersize` and ancestor limits): https://github.com/bitcoin/bitcoin
+- Bitcoin Cash Node source (`pow.cpp` `GetNextASERTWorkRequired`/`CalculateASERT`, `chainparams.cpp` ASERT
+  anchor, `test/pow_tests.cpp`, commit `7b53312`): https://gitlab.com/bitcoin-cash-node/bitcoin-cash-node
+- CAIP-2 `bip122` namespace (Bitcoin Cash id): https://github.com/ChainAgnostic/namespaces/blob/main/bip122/caip2.md
 - BIP-144 (segwit serialization): https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki
 - BIP-122 (CAIP-2 chain id for Bitcoin): https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki
 - Esplora API used by the fixture fetcher: https://github.com/Blockstream/esplora/blob/master/API.md
