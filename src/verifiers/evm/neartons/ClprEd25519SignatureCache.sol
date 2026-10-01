@@ -8,8 +8,8 @@ import {IEd25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/lib/IEd2551
 ///         that is too expensive for one Hedera transaction across several.
 ///
 ///         Pure-Solidity Ed25519 costs ~640k gas per signature, so one 15M-gas transaction checks at
-///         most ~21 signatures. NEAR mainnet needs ~34 block-producer approvals per light-client block
-///         and TON mainnet ~63–69 masterchain validator signatures per block. A relayer first calls
+///         most ~21 signatures. NEAR mainnet needs 31–49 block-producer approvals per light-client block
+///         (recorded fixtures) and TON mainnet 68–69 masterchain validator signatures per block. A relayer first calls
 ///         {record} in as many transactions as needed (~20 signatures each); the verifier then accepts
 ///         a signer whose signature it finds here instead of re-checking it.
 ///
