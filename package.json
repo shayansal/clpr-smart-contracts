@@ -17,6 +17,8 @@
     "test:e2e:eth-live": "vitest run test/e2e/tests/verifiers/eth-live-sepolia.spec.ts",
     "test:e2e:cometbft-live": "vitest run test/e2e/tests/verifiers/cometbft-live.spec.ts",
     "cometbft-live:refresh": "tsx test/e2e/relay/buildCometBftLiveFixture.ts",
+    "test:e2e:arc-live": "vitest run test/e2e/tests/verifiers/arc-live.spec.ts",
+    "arc-live:refresh": "tsx test/e2e/relay/buildArcLiveFixture.ts",
     "eth-live:refresh": "tsx test/e2e/relay/buildEthLiveProof.ts --refresh --wait-nonsigners 600",
     "test:e2e:sei-verifier": "CLPR_BACKEND=sei vitest run test/e2e/tests/verifiers/sei-verifier.spec.ts",
     "test:e2e:all": "npm run test:e2e:anvil && npm run test:e2e:besu",
