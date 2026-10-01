@@ -71,16 +71,45 @@ export const LIVE_CHANNEL_ID: Hex = keccak256(toHex("clpr/eth-live-beacon-proofs
 // ── Verifier constants (mirror EthMainnetVerifier / ClprBeaconSsz) ─────────
 const SYNC_COMMITTEE_SIZE = 512;
 const SYNC_BITS_LENGTH = 64;
-const EXECUTION_PAYLOAD_GINDEX_IN_BODY = 25n; // light-client execution_branch (depth 4)
-const EXECUTION_PAYLOAD_HEADER_DEPTH = 5; // 17 fields → 32 leaves (Deneb, Electra, Fulu)
+const EXECUTION_PAYLOAD_GINDEX_IN_BODY = 25n; // light-client execution_branch (depth 4), Capella → Fulu
 const STATE_ROOT_FIELD_INDEX = 2;
-const GINDEX_EXECUTION_STATE_ROOT_IN_BODY = 802n; // (25 << 5) | 2
-const EXECUTION_BRANCH_DEPTH = 9;
-const GINDEX_NEXT_SYNC_COMMITTEE_IN_STATE = 87n; // Electra+ BeaconState (depth 6)
-const NEXT_COMMITTEE_BRANCH_DEPTH = 6;
-/// Forks whose light-client header carries a 17-field (Deneb-layout) ExecutionPayloadHeader and a
-/// depth-6 BeaconState (the only layouts EthMainnetVerifier's constants accept).
-const SUPPORTED_FORKS = new Set(["electra", "fulu"]);
+
+/// SSZ layout of the light-client proofs per consensus fork (the fork name the beacon API reports
+/// as `version`). EthMainnetVerifier's constants are the Electra/Fulu row; EthBeaconTwinVerifier
+/// takes the gindices as constructor parameters (Capella for PulseChain, Fulu for Gnosis).
+export interface BeaconLayout {
+    /// ExecutionPayloadHeader field count → tree depth (15 → 4 in Capella, 17 → 5 from Deneb).
+    payloadHeaderFields: number;
+    payloadHeaderDepth: number;
+    /// `execution_payload.state_root` in BeaconBlockBody: (25 << payloadHeaderDepth) | 2.
+    executionStateRootGindex: bigint;
+    executionBranchDepth: number;
+    /// `next_sync_committee` / `current_sync_committee` in BeaconState (55/54 to Deneb, 87/86 from Electra).
+    nextSyncCommitteeGindex: bigint;
+    nextCommitteeBranchDepth: number;
+    currentSyncCommitteeGindex: bigint;
+}
+const CAPELLA_LAYOUT: BeaconLayout = {
+    payloadHeaderFields: 15, payloadHeaderDepth: 4, executionStateRootGindex: 402n, executionBranchDepth: 8,
+    nextSyncCommitteeGindex: 55n, nextCommitteeBranchDepth: 5, currentSyncCommitteeGindex: 54n
+};
+const DENEB_LAYOUT: BeaconLayout = {
+    payloadHeaderFields: 17, payloadHeaderDepth: 5, executionStateRootGindex: 802n, executionBranchDepth: 9,
+    nextSyncCommitteeGindex: 55n, nextCommitteeBranchDepth: 5, currentSyncCommitteeGindex: 54n
+};
+const ELECTRA_LAYOUT: BeaconLayout = {...DENEB_LAYOUT, nextSyncCommitteeGindex: 87n, nextCommitteeBranchDepth: 6, currentSyncCommitteeGindex: 86n};
+export const BEACON_LAYOUTS: Record<string, BeaconLayout> = {
+    capella: CAPELLA_LAYOUT,
+    deneb: DENEB_LAYOUT,
+    electra: ELECTRA_LAYOUT,
+    fulu: ELECTRA_LAYOUT
+};
+
+export function layoutFor(version: string): BeaconLayout {
+    const l = BEACON_LAYOUTS[version];
+    if (!l) throw new Error(`unsupported light-client fork "${version}" (supported: ${Object.keys(BEACON_LAYOUTS)})`);
+    return l;
+}
 
 // ── Raw API shapes (only the fields we use) ────────────────────────────────
 export interface BeaconHeaderJson {
@@ -107,8 +136,9 @@ export interface ExecutionPayloadHeaderJson {
     block_hash: string;
     transactions_root: string;
     withdrawals_root: string;
-    blob_gas_used: string;
-    excess_blob_gas: string;
+    /// Absent in Capella (15-field header).
+    blob_gas_used?: string;
+    excess_blob_gas?: string;
 }
 
 export interface LightClientHeaderJson {
@@ -176,6 +206,10 @@ export interface LiveCapture {
     /// `light_client/updates?start_period={signing period}` — a real rotation (`next_sync_committee`
     /// + branch against the attested state root), signed by the same committee.
     rotationUpdate?: LightClientUpdateJson;
+    /// Set when the light-client objects were NOT served by a light-client API but rebuilt from the
+    /// beacon node's SSZ `debug/beacon/states` + `beacon/blocks` (PulseChain has no light-client
+    /// server). The objects keep the light-client JSON shapes; every root is re-checked offline.
+    derivedFrom?: {method: "beacon-state-ssz"; signatureBlockRoot: string; note: string};
     account: {
         address: string;
         blockNumber: string;
@@ -259,9 +293,9 @@ function extraDataRoot(buf: Buffer): Buffer {
     return sha256(rightPad32(buf), uint64Chunk(String(buf.length)));
 }
 
-/// The 17 ExecutionPayloadHeader field roots (Deneb layout; unchanged in Electra and Fulu).
-export function executionPayloadHeaderLeaves(e: ExecutionPayloadHeaderJson): Buffer[] {
-    return [
+/// The ExecutionPayloadHeader field roots: 15 in Capella, 17 from Deneb (unchanged in Electra and Fulu).
+export function executionPayloadHeaderLeaves(e: ExecutionPayloadHeaderJson, layout: BeaconLayout = ELECTRA_LAYOUT): Buffer[] {
+    const leaves = [
         hexToBuf(e.parent_hash),
         rightPad32(hexToBuf(e.fee_recipient)),
         hexToBuf(e.state_root),
@@ -276,22 +310,27 @@ export function executionPayloadHeaderLeaves(e: ExecutionPayloadHeaderJson): Buf
         uint256Chunk(e.base_fee_per_gas),
         hexToBuf(e.block_hash),
         hexToBuf(e.transactions_root),
-        hexToBuf(e.withdrawals_root),
-        uint64Chunk(e.blob_gas_used),
-        uint64Chunk(e.excess_blob_gas)
+        hexToBuf(e.withdrawals_root)
     ];
+    if (layout.payloadHeaderFields === 17) {
+        if (e.blob_gas_used === undefined || e.excess_blob_gas === undefined) throw new Error("Deneb+ header without blob fields");
+        leaves.push(uint64Chunk(e.blob_gas_used), uint64Chunk(e.excess_blob_gas));
+    } else if (layout.payloadHeaderFields !== 15) {
+        throw new Error(`unknown ExecutionPayloadHeader layout (${layout.payloadHeaderFields} fields)`);
+    }
+    return leaves;
 }
 
-/// Build the 9-sibling `state_root → body_root` branch the verifier expects (gindex 802), checking
-/// every intermediate root against the header. Throws on any mismatch.
-export function buildExecutionStateRootBranch(h: LightClientHeaderJson): {
+/// Build the `state_root → body_root` branch the verifier expects (gindex 802 / depth 9 from Deneb,
+/// 402 / 8 in Capella), checking every intermediate root against the header. Throws on any mismatch.
+export function buildExecutionStateRootBranch(h: LightClientHeaderJson, layout: BeaconLayout = ELECTRA_LAYOUT): {
     stateRoot: Buffer;
     branch: Buffer[];
     payloadHeaderRoot: Buffer;
 } {
-    const leaves = executionPayloadHeaderLeaves(h.execution);
-    const levels = merkleLevels(leaves, 1 << EXECUTION_PAYLOAD_HEADER_DEPTH);
-    const payloadHeaderRoot = levels[EXECUTION_PAYLOAD_HEADER_DEPTH][0];
+    const leaves = executionPayloadHeaderLeaves(h.execution, layout);
+    const levels = merkleLevels(leaves, 1 << layout.payloadHeaderDepth);
+    const payloadHeaderRoot = levels[layout.payloadHeaderDepth][0];
     const bodyRoot = hexToBuf(h.beacon.body_root);
     const lcBranch = h.execution_branch.map(hexToBuf);
     if (lcBranch.length !== 4) throw new Error(`execution_branch depth ${lcBranch.length} != 4`);
@@ -301,9 +340,11 @@ export function buildExecutionStateRootBranch(h: LightClientHeaderJson): {
     const inner = merkleBranch(levels, STATE_ROOT_FIELD_INDEX);
     const branch = [...inner, ...lcBranch];
     const stateRoot = hexToBuf(h.execution.state_root);
-    if (branch.length !== EXECUTION_BRANCH_DEPTH) throw new Error("execution state-root branch depth != 9");
-    if (!foldSszBranch(stateRoot, branch, GINDEX_EXECUTION_STATE_ROOT_IN_BODY).equals(bodyRoot)) {
-        throw new Error("state_root does not fold to body_root at gindex 802");
+    if (branch.length !== layout.executionBranchDepth) {
+        throw new Error(`execution state-root branch depth ${branch.length} != ${layout.executionBranchDepth}`);
+    }
+    if (!foldSszBranch(stateRoot, branch, layout.executionStateRootGindex).equals(bodyRoot)) {
+        throw new Error(`state_root does not fold to body_root at gindex ${layout.executionStateRootGindex}`);
     }
     return {stateRoot, branch, payloadHeaderRoot};
 }
@@ -458,7 +499,7 @@ function signedHeaderInputs(
 // ── Committee selection ────────────────────────────────────────────────────
 /// SSZ `current_sync_committee` gindex in BeaconState: 54 (depth 5) through Deneb, 86 (depth 6) from Electra.
 function currentCommitteeGindex(version: string): bigint {
-    return SUPPORTED_FORKS.has(version) ? 86n : 54n;
+    return layoutFor(version).currentSyncCommitteeGindex;
 }
 
 /// The committee that signed the finality update, authenticated off-chain against the bootstrap
@@ -482,24 +523,24 @@ export function signingCommittee(capture: LiveCapture): {committee: DecodedCommi
     }
     if (sigPeriod === bootPeriod + 1n && capture.committeeUpdate) {
         const u = capture.committeeUpdate.data;
-        verifyNextCommitteeBranch(u);
+        verifyNextCommitteeBranch(u, layoutFor(capture.committeeUpdate.version));
         return {committee: decodeCommittee(u.next_sync_committee), period: sigPeriod};
     }
     throw new Error(`no committee for signature period ${sigPeriod} (bootstrap period ${bootPeriod})`);
 }
 
-function verifyNextCommitteeBranch(u: LightClientUpdateJson["data"]): void {
+function verifyNextCommitteeBranch(u: LightClientUpdateJson["data"], layout: BeaconLayout): void {
     const root = syncCommitteeRootFromCompressed(
         u.next_sync_committee.pubkeys.map(hexToBuf),
         hexToBuf(u.next_sync_committee.aggregate_pubkey)
     );
     const branch = u.next_sync_committee_branch.map(hexToBuf);
-    if (branch.length !== NEXT_COMMITTEE_BRANCH_DEPTH) {
-        throw new Error(`next_sync_committee_branch depth ${branch.length} != ${NEXT_COMMITTEE_BRANCH_DEPTH}`);
+    if (branch.length !== layout.nextCommitteeBranchDepth) {
+        throw new Error(`next_sync_committee_branch depth ${branch.length} != ${layout.nextCommitteeBranchDepth}`);
     }
-    if (!foldSszBranch(root, branch, GINDEX_NEXT_SYNC_COMMITTEE_IN_STATE)
+    if (!foldSszBranch(root, branch, layout.nextSyncCommitteeGindex)
         .equals(hexToBuf(u.attested_header.beacon.state_root))) {
-        throw new Error("next_sync_committee_branch does not verify at gindex 87");
+        throw new Error(`next_sync_committee_branch does not verify at gindex ${layout.nextSyncCommitteeGindex}`);
     }
 }
 
@@ -515,6 +556,7 @@ export interface EthLiveProof {
     meta: {
         network: string;
         forkName: string;
+        layout: BeaconLayout;
         attestedSlot: bigint;
         signatureSlot: bigint;
         period: bigint;
@@ -538,6 +580,10 @@ export interface EthLiveProof {
         storageProof: Input;
         nonSignerEntries: Buffer[];
     };
+    /// Full rotation bundle: same attested header, signature and storage proof as `proofBytes`, plus
+    /// the real `next_sync_committee` + branch in items 4/5. Present only when the capture's rotation
+    /// update attests the SAME header as the finality update (state-derived captures, e.g. PulseChain).
+    rotationProofBytes?: Hex;
     /// A real sync-committee rotation (from `light_client/updates`), for the rotation harness.
     rotation?: {
         rotationRlp: Hex; // RLP[nextCommittee(uncompressed), nextCommitteeBranch]
@@ -558,15 +604,13 @@ export interface EthLiveProof {
 /// (committee branch, aggregate, off-chain BLS, SSZ folds, execution block binding).
 export function buildEthLiveProof(capture: LiveCapture): EthLiveProof {
     const fu = capture.finalityUpdate;
-    if (!SUPPORTED_FORKS.has(fu.version)) {
-        throw new Error(`unsupported light-client fork "${fu.version}" (supported: ${[...SUPPORTED_FORKS]})`);
-    }
+    const layout = layoutFor(fu.version);
     const attested = fu.data.attested_header;
     const signatureSlot = BigInt(fu.data.signature_slot);
     const {committee, period} = signingCommittee(capture);
 
     const signed = signedHeaderInputs(capture, committee, attested.beacon, fu.data.sync_aggregate, signatureSlot);
-    const exec = buildExecutionStateRootBranch(attested);
+    const exec = buildExecutionStateRootBranch(attested, layout);
 
     // Execution-layer binding: eth_getProof was taken at the attested header's execution block.
     const acct = capture.account;
@@ -620,6 +664,7 @@ export function buildEthLiveProof(capture: LiveCapture): EthLiveProof {
         meta: {
             network: capture.network,
             forkName: fu.version,
+            layout,
             attestedSlot: BigInt(attested.beacon.slot),
             signatureSlot,
             period,
@@ -646,11 +691,11 @@ export function buildEthLiveProof(capture: LiveCapture): EthLiveProof {
 
     // Optional real rotation, signed by the same committee (same period).
     const ru = capture.rotationUpdate;
-    if (ru && SUPPORTED_FORKS.has(ru.version)) {
+    if (ru && BEACON_LAYOUTS[ru.version]) {
         const spp = slotsPerPeriod(capture.spec);
         const u = ru.data;
         if (BigInt(u.signature_slot) / spp === period) {
-            verifyNextCommitteeBranch(u);
+            verifyNextCommitteeBranch(u, layoutFor(ru.version));
             const rs = signedHeaderInputs(
                 capture, committee, u.attested_header.beacon, u.sync_aggregate, BigInt(u.signature_slot)
             );
@@ -668,21 +713,32 @@ export function buildEthLiveProof(capture: LiveCapture): EthLiveProof {
                 nextCommitteeMerkleRoot: hex(committeeMerkleRoot(next.pubkeys)),
                 nextAggregate: hex(next.aggregate)
             };
+            if (beaconHeaderRoot(u.attested_header.beacon) === hex(signed.beaconBlockRoot)) {
+                out.rotationProofBytes = reencodeBundle(out.parts, {}, [
+                    [next.pubkeys, next.aggregate],
+                    u.next_sync_committee_branch.map(hexToBuf)
+                ]);
+            }
         }
     }
     return out;
 }
 
-/// Re-encode the bundle with one part replaced (negative tests).
-export function reencodeBundle(p: EthLiveProof["parts"], override: Partial<EthLiveProof["parts"]>): Hex {
+/// Re-encode the bundle with one part replaced (negative tests). `rotation` = [nextCommittee, branch]
+/// fills items 4/5 (absent: empty string + empty list).
+export function reencodeBundle(
+    p: EthLiveProof["parts"],
+    override: Partial<EthLiveProof["parts"]>,
+    rotation?: [Input, Input]
+): Hex {
     const q = {...p, ...override};
     return hex(rlpEncode([
         q.attestedHeader,
         q.syncAggregate,
         q.executionStateRoot,
         q.executionBranch,
-        Buffer.alloc(0),
-        [],
+        rotation ? rotation[0] : Buffer.alloc(0),
+        rotation ? rotation[1] : [],
         q.accountProof,
         q.storageProof,
         Buffer.alloc(0),
