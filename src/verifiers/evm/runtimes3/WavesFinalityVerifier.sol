@@ -6,7 +6,7 @@ import {Blake2b256} from "@hiero-ledger/clpr/verifiers/evm/runtimes3/lib/Blake2b
 import {ClprProtobufHelpers as PB} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 
 /// @title WavesFinalityVerifier
-/// @notice The finality half of a Waves → Hiero verifier. NOT an IClprVerifier: Waves has no public
+/// @notice The finality half of a Waves → Hiero verifier. NOT a CLPR bundle verifier (it does not implement the verifier interface): Waves has no public
 ///         state proof for a Ride dApp's data entries (see the family README, "Limits and known gaps"),
 ///         so this contract proves only that a block is final.
 ///

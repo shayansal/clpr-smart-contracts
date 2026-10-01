@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
-import {Runtimes3TestBase} from "./Runtimes3TestBase.sol";
+import {FuelSyntheticChain} from "./FuelSyntheticChain.sol";
 import {MockEthL1StateVerifier} from "./MockEthL1StateVerifier.sol";
 import {FuelVerifier} from "@hiero-ledger/clpr/verifiers/evm/runtimes3/FuelVerifier.sol";
 import {FuelBlockProof} from "@hiero-ledger/clpr/verifiers/evm/runtimes3/lib/FuelBlockProof.sol";
@@ -14,235 +14,9 @@ import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 /// @dev FuelVerifier against a synthetic Fuel chain (two blocks below the commit), synthetic
 ///      FuelChainState storage (a real MPT branch with four leaves) and a mock L1 light client.
 ///      The real Ethereum light client and real Fuel data run in fuel-live.spec.ts.
-contract FuelVerifierTest is Runtimes3TestBase {
-    MockEthL1StateVerifier internal l1;
-    FuelVerifier internal verifier;
-
-    address internal constant CHAIN_STATE = address(0xF0E1);
-    bytes32 internal constant CODE_HASH = keccak256("FuelChainState proxy code");
-    address internal constant IMPL = address(0x1111);
-    bytes32 internal constant RECIPIENT = bytes32(uint256(0xC1C1));
-    bytes32 internal constant SERVICE = keccak256("fuel clpr contract id");
-    uint64 internal constant COMMIT_TS = 1_000_000;
-    uint64 internal constant TTF = 3600;
-    uint64 internal constant FINAL_SLOT = (COMMIT_TS + TTF) / 12 + 1;
-
+contract FuelVerifierTest is FuelSyntheticChain {
     function setUp() public {
-        l1 = new MockEthL1StateVerifier();
-        verifier = new FuelVerifier(_profile(TTF, IMPL));
-    }
-
-    function _profile(uint64 ttf, address impl) internal view returns (FuelVerifier.Profile memory p) {
-        p = FuelVerifier.Profile({
-            l1StateVerifier: IEthL1StateVerifier(address(l1)),
-            l1GenesisTime: 0,
-            l1SecondsPerSlot: 12,
-            chainState: CHAIN_STATE,
-            chainStateCodeHash: CODE_HASH,
-            chainStateImplementation: impl,
-            commitSlotsBase: 301,
-            pausedSlot: 51,
-            numCommitSlots: 240,
-            blocksPerCommitInterval: 1,
-            timeToFinalize: ttf,
-            messageRecipient: RECIPIENT
-        });
-    }
-
-    // ── Synthetic Fuel chain ─────────────────────────────────────────────────
-
-    struct Msg {
-        bytes32 sender;
-        bytes32 recipient;
-        bytes32 nonce;
-        uint64 amount;
-        bytes data;
-    }
-
-    struct FuelChain {
-        bytes commitHeader;
-        bytes messageHeader;
-        bytes blockProof;
-        bytes messageProof;
-        bytes message;
-        bytes32 commitId;
-    }
-
-    function _msg(bytes memory record) internal pure returns (Msg memory) {
-        return Msg({
-            sender: SERVICE,
-            recipient: RECIPIENT,
-            nonce: keccak256("nonce"),
-            amount: 0,
-            data: abi.encodePacked(CHANNEL_ID, record)
-        });
-    }
-
-    function _merkle(uint256 index, bytes32[] memory siblings) internal pure returns (bytes memory) {
-        bytes[] memory s = new bytes[](siblings.length);
-        for (uint256 i; i < siblings.length; ++i) {
-            s[i] = RLP.encode(siblings[i]);
-        }
-        bytes[] memory f = new bytes[](2);
-        f[0] = RLP.encode(index);
-        f[1] = RLP.encode(s);
-        return RLP.encode(f);
-    }
-
-    /// @dev Message block at height 1 (one message), committed block at height 2 whose prevRoot
-    ///      covers blocks 0 and 1.
-    function _chain(Msg memory m) internal pure returns (FuelChain memory c) {
-        bytes32 id = FuelBlockProof.messageId(m.sender, m.recipient, m.nonce, m.amount, m.data);
-        c.messageHeader = abi.encodePacked(
-            keccak256("prev root of block 1"),
-            uint32(1),
-            uint64(4611686020218000000),
-            uint64(7),
-            uint32(1),
-            uint32(1),
-            uint16(1),
-            uint32(1),
-            keccak256("tx root"),
-            FuelBlockProof.leafDigest(id),
-            keccak256("event inbox root")
-        );
-        bytes32 messageBlockId = FuelBlockProof.fullHeader(c.messageHeader).id;
-        bytes32 block0Leaf = FuelBlockProof.leafDigest(keccak256("block 0 id"));
-        bytes32 prevRoot = FuelBlockProof.nodeDigest(block0Leaf, FuelBlockProof.leafDigest(messageBlockId));
-        c.commitHeader = abi.encodePacked(prevRoot, uint32(2), uint64(4611686020218000100), keccak256("app hash 2"));
-        c.commitId = sha256(c.commitHeader);
-        bytes32[] memory sib = new bytes32[](1);
-        sib[0] = block0Leaf;
-        c.blockProof = _merkle(1, sib);
-        c.messageProof = _merkle(0, new bytes32[](0));
-        bytes[] memory mf = new bytes[](5);
-        mf[0] = RLP.encode(m.sender);
-        mf[1] = RLP.encode(m.recipient);
-        mf[2] = RLP.encode(m.nonce);
-        mf[3] = RLP.encode(uint256(m.amount));
-        mf[4] = RLP.encode(m.data);
-        c.message = RLP.encode(mf);
-    }
-
-    // ── Synthetic FuelChainState storage (MPT: one branch, four leaves) ─────
-
-    function _leaf(bytes32 slot, bytes32 value) internal pure returns (bytes memory) {
-        bytes32 k = keccak256(abi.encodePacked(slot));
-        bytes memory compact = new bytes(32);
-        compact[0] = bytes1(0x30 | (uint8(k[0]) & 0x0f));
-        for (uint256 i = 1; i < 32; i++) {
-            compact[i] = k[i];
-        }
-        bytes[] memory items = new bytes[](2);
-        items[0] = RLP.encode(compact);
-        items[1] = RLP.encode(RLP.encode(uint256(value)));
-        return RLP.encode(items);
-    }
-
-    function _storage(bytes32[] memory slots, bytes32[] memory values)
-        internal
-        pure
-        returns (bytes32 root, bytes memory storageProof)
-    {
-        bytes[] memory leaves = new bytes[](slots.length);
-        bytes[] memory branch = new bytes[](17);
-        for (uint256 n; n < 17; ++n) {
-            branch[n] = RLP.encode(new bytes(0));
-        }
-        for (uint256 i; i < slots.length; ++i) {
-            leaves[i] = _leaf(slots[i], values[i]);
-            uint8 nib = uint8(keccak256(abi.encodePacked(slots[i]))[0]) >> 4;
-            require(keccak256(branch[nib]) == keccak256(RLP.encode(new bytes(0))), "nibble collision");
-            branch[nib] = RLP.encode(abi.encodePacked(keccak256(leaves[i])));
-        }
-        bytes memory branchNode = RLP.encode(branch);
-        root = keccak256(branchNode);
-        bytes[] memory entries = new bytes[](slots.length);
-        for (uint256 i; i < slots.length; ++i) {
-            bytes[] memory nodes = new bytes[](2);
-            nodes[0] = RLP.encode(branchNode);
-            nodes[1] = RLP.encode(leaves[i]);
-            bytes[] memory entry = new bytes[](2);
-            entry[0] = RLP.encode(abi.encodePacked(slots[i]));
-            entry[1] = RLP.encode(nodes);
-            entries[i] = RLP.encode(entry);
-        }
-        storageProof = RLP.encode(entries);
-    }
-
-    function _account(bytes32 storageRoot, bytes32 codeHash) internal pure returns (bytes32 root, bytes memory proof) {
-        bytes32 k = keccak256(abi.encodePacked(CHAIN_STATE));
-        bytes memory path = abi.encodePacked(bytes1(0x20), k);
-        bytes[] memory acct = new bytes[](4);
-        acct[0] = RLP.encode(uint256(1));
-        acct[1] = RLP.encode(uint256(0));
-        acct[2] = RLP.encode(storageRoot);
-        acct[3] = RLP.encode(codeHash);
-        bytes[] memory items = new bytes[](2);
-        items[0] = RLP.encode(path);
-        items[1] = RLP.encode(RLP.encode(acct));
-        bytes memory leaf = RLP.encode(items);
-        root = keccak256(leaf);
-        bytes[] memory nodes = new bytes[](1);
-        nodes[0] = RLP.encode(leaf);
-        proof = RLP.encode(nodes);
-    }
-
-    struct L1Opts {
-        bytes32 committedId;
-        uint64 commitTs;
-        bool paused;
-        address impl;
-        bytes32 codeHash;
-    }
-
-    function _l1(FuelChain memory c) internal pure returns (L1Opts memory) {
-        return L1Opts({committedId: c.commitId, commitTs: COMMIT_TS, paused: false, impl: IMPL, codeHash: CODE_HASH});
-    }
-
-    function _bundle(FuelChain memory c, L1Opts memory o, uint64 slot, bytes memory manifest)
-        internal
-        returns (bytes memory)
-    {
-        bytes32[] memory slots = verifier.chainStateSlots(2);
-        bytes32[] memory values = new bytes32[](4);
-        values[0] = o.committedId;
-        values[1] = bytes32(uint256(o.commitTs));
-        values[2] = o.paused ? bytes32(uint256(1)) : bytes32(0);
-        values[3] = bytes32(uint256(uint160(o.impl)));
-        (bytes32 storageRoot, bytes memory storageProof) = _storage(slots, values);
-        (bytes32 stateRoot, bytes memory accountProof) = _account(storageRoot, o.codeHash);
-        l1.set(stateRoot, slot, "");
-
-        bytes[] memory items = new bytes[](manifest.length == 0 ? 9 : 10);
-        items[0] = RLP.encode(bytes("light client proof (mocked)"));
-        items[1] = accountProof;
-        items[2] = storageProof;
-        items[3] = RLP.encode(c.commitHeader);
-        items[4] = RLP.encode(c.messageHeader);
-        items[5] = c.blockProof;
-        items[6] = c.messageProof;
-        items[7] = c.message;
-        items[8] = RLP.encode(_bundleContent());
-        if (manifest.length != 0) items[9] = RLP.encode(manifest);
-        return RLP.encode(items);
-    }
-
-    function _anchor(bytes32 channelId) internal pure returns (bytes memory) {
-        return abi.encodePacked(
-            keccak256("gvr"), bytes4(0x06000000), channelId, new bytes(128), keccak256("committee root"), CODE_HASH
-        );
-    }
-
-    function _ctx() internal pure returns (bytes memory) {
-        return ClprTypes.encodeChannelContext(
-            ClprTypes.ChannelContext({channelId: CHANNEL_ID, remoteServiceAddress: abi.encodePacked(SERVICE)})
-        );
-    }
-
-    function _default() internal returns (bytes memory) {
-        FuelChain memory c = _chain(_msg(_defaultRecord()));
-        return _bundle(c, _l1(c), FINAL_SLOT, "");
+        _deployFuel();
     }
 
     // ── Happy paths ──────────────────────────────────────────────────────────
@@ -254,7 +28,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
             bytes[] memory payloads,
             bytes memory newAnchor,,
             ClprTypes.ClprEndpointManifest memory man
-        ) = verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        ) = fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
         _assertDefaultMetadata(m);
         assertEq(payloads.length, 2);
         assertEq(newAnchor.length, 0);
@@ -264,7 +38,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
     function test_verifyBundle_passesRotationThrough() public {
         bytes memory proof = _default();
         l1.set(l1.stateRoot(), FINAL_SLOT, hex"aabb");
-        (,, bytes memory newAnchor, bytes memory newId,) = verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        (,, bytes memory newAnchor, bytes memory newId,) = fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
         assertEq(newAnchor, hex"aabb");
         assertEq(newId, abi.encodePacked(uint64(7)));
     }
@@ -273,7 +47,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         bytes memory manifest = _manifest(abi.encodePacked(SERVICE));
         FuelChain memory c = _chain(_msg(_record(1, 7, 3, 2, keccak256(manifest))));
         (,,,, ClprTypes.ClprEndpointManifest memory man) =
-            verifier.verifyBundle(_bundle(c, _l1(c), FINAL_SLOT, manifest), _anchor(CHANNEL_ID), _ctx());
+            fuel.verifyBundle(_bundle(c, _l1(c), FINAL_SLOT, manifest), _anchor(CHANNEL_ID), _ctx());
         assertEq(man.version, 3);
     }
 
@@ -281,7 +55,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         FuelChain memory c = _chain(_msg(_defaultRecord()));
         bytes[] memory items = new bytes[](8);
         items[0] = RLP.encode(bytes("lc"));
-        bytes32[] memory slots = verifier.chainStateSlots(2);
+        bytes32[] memory slots = fuel.chainStateSlots(2);
         bytes32[] memory values = new bytes32[](4);
         values[0] = c.commitId;
         values[1] = bytes32(uint256(COMMIT_TS));
@@ -296,7 +70,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         items[5] = c.blockProof;
         items[6] = c.messageProof;
         items[7] = c.message;
-        (FuelVerifier.FuelMessage memory m,,) = verifier.verifyFuelMessage(RLP.encode(items), _anchor(CHANNEL_ID));
+        (FuelVerifier.FuelMessage memory m,,) = fuel.verifyFuelMessage(RLP.encode(items), _anchor(CHANNEL_ID));
         assertEq(m.sender, SERVICE);
         assertEq(m.blockHeight, 1);
         assertEq(m.commitHeight, 2);
@@ -308,14 +82,14 @@ contract FuelVerifierTest is Runtimes3TestBase {
     function test_revert_otherChannelAnchor() public {
         bytes memory proof = _default();
         vm.expectRevert(FuelVerifier.ChannelMismatch.selector);
-        verifier.verifyBundle(proof, _anchor(keccak256("other")), _ctx());
+        fuel.verifyBundle(proof, _anchor(keccak256("other")), _ctx());
     }
 
     function test_revert_commitNotFinal() public {
         FuelChain memory c = _chain(_msg(_defaultRecord()));
         bytes memory proof = _bundle(c, _l1(c), (COMMIT_TS + TTF) / 12 - 1, "");
         vm.expectRevert(FuelVerifier.CommitNotFinal.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_commitMismatch() public {
@@ -324,7 +98,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         o.committedId = keccak256("another committed block");
         bytes memory proof = _bundle(c, o, FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.CommitMismatch.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_paused() public {
@@ -333,7 +107,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         o.paused = true;
         bytes memory proof = _bundle(c, o, FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.ChainStatePaused.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_upgradedImplementation() public {
@@ -342,7 +116,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         o.impl = address(0x2222);
         bytes memory proof = _bundle(c, o, FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.ImplementationMismatch.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_wrongCodeHash() public {
@@ -351,7 +125,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         o.codeHash = keccak256("other code");
         bytes memory proof = _bundle(c, o, FINAL_SLOT, "");
         vm.expectRevert(ClprEvmBundleVerifier.CodeHashMismatch.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_blockNotInHistory() public {
@@ -359,7 +133,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         c.blockProof = _merkle(0, new bytes32[](1));
         bytes memory proof = _bundle(c, _l1(c), FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.BlockNotInHistory.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_tamperedMessageData() public {
@@ -368,7 +142,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         c.message = forged.message; // same outbox root, other data
         bytes memory proof = _bundle(c, _l1(c), FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.MessageNotInBlock.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_wrongSender() public {
@@ -377,7 +151,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         FuelChain memory c = _chain(m);
         bytes memory proof = _bundle(c, _l1(c), FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.InvalidMessage.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_wrongRecipient() public {
@@ -386,7 +160,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         FuelChain memory c = _chain(m);
         bytes memory proof = _bundle(c, _l1(c), FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.InvalidMessage.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_nonZeroAmount() public {
@@ -395,7 +169,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
         FuelChain memory c = _chain(m);
         bytes memory proof = _bundle(c, _l1(c), FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.InvalidMessage.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_recordForOtherChannel() public {
@@ -404,14 +178,14 @@ contract FuelVerifierTest is Runtimes3TestBase {
         FuelChain memory c = _chain(m);
         bytes memory proof = _bundle(c, _l1(c), FINAL_SLOT, "");
         vm.expectRevert(FuelVerifier.InvalidMessage.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     function test_revert_badRecord() public {
         FuelChain memory c = _chain(_msg(_record(9, 7, 3, 2, bytes32(0))));
         bytes memory proof = _bundle(c, _l1(c), FINAL_SLOT, "");
         vm.expectRevert(ClprQueueRecordVerifier.InvalidQueueRecord.selector);
-        verifier.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
+        fuel.verifyBundle(proof, _anchor(CHANNEL_ID), _ctx());
     }
 
     // ── verifyConfig ─────────────────────────────────────────────────────────
@@ -421,7 +195,7 @@ contract FuelVerifierTest is Runtimes3TestBase {
             _anchor(CHANNEL_ID), abi.encodePacked(uint64(5)), _controlMessage("fuel:9889", abi.encodePacked(SERVICE))
         );
         (bytes memory ctx, string memory chainId,,,, bytes memory anchor,, ClprTypes.ClprEndpointManifest memory man) =
-            verifier.verifyConfig(cfg, CHANNEL_ID, "");
+            fuel.verifyConfig(cfg, CHANNEL_ID, "");
         assertEq(ctx, _ctx());
         assertEq(chainId, "fuel:9889");
         assertEq(anchor, _anchor(CHANNEL_ID));
@@ -433,21 +207,21 @@ contract FuelVerifierTest is Runtimes3TestBase {
         badAnchor[259] = 0x00;
         bytes memory cfg = abi.encode(badAnchor, hex"05", _controlMessage("fuel:9889", abi.encodePacked(SERVICE)));
         vm.expectRevert(FuelVerifier.InvalidTrustAnchor.selector);
-        verifier.verifyConfig(cfg, CHANNEL_ID, "");
+        fuel.verifyConfig(cfg, CHANNEL_ID, "");
     }
 
-    function test_revert_config_manifestProof() public {
+    function test_revert_config_malformedManifestProof() public {
         bytes memory cfg =
             abi.encode(_anchor(CHANNEL_ID), hex"05", _controlMessage("fuel:9889", abi.encodePacked(SERVICE)));
-        vm.expectRevert(FuelVerifier.ManifestProofUnsupported.selector);
-        verifier.verifyConfig(cfg, CHANNEL_ID, hex"01");
+        vm.expectRevert();
+        fuel.verifyConfig(cfg, CHANNEL_ID, hex"01");
     }
 
     function test_revert_config_namespace() public {
         bytes memory cfg =
             abi.encode(_anchor(CHANNEL_ID), hex"05", _controlMessage("eip155:1", abi.encodePacked(SERVICE)));
         vm.expectRevert(ClprQueueRecordVerifier.WrongChainNamespace.selector);
-        verifier.verifyConfig(cfg, CHANNEL_ID, "");
+        fuel.verifyConfig(cfg, CHANNEL_ID, "");
     }
 
     // ── FuelBlockProof ───────────────────────────────────────────────────────

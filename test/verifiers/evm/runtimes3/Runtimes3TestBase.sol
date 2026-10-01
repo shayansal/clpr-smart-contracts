@@ -28,8 +28,19 @@ abstract contract Runtimes3TestBase is Test {
         pure
         returns (bytes memory)
     {
+        return _recordWithSent(status, nextId, recvId, manifestVersion, commitment, SENT_HASH);
+    }
+
+    function _recordWithSent(
+        uint8 status,
+        uint64 nextId,
+        uint64 recvId,
+        uint64 manifestVersion,
+        bytes32 commitment,
+        bytes32 sentHash
+    ) internal pure returns (bytes memory) {
         bytes memory head = abi.encodePacked(
-            status, _le64(nextId), _le64(recvId), uint8(32), SENT_HASH, uint8(32), RECV_HASH, _le64(manifestVersion)
+            status, _le64(nextId), _le64(recvId), uint8(32), sentHash, uint8(32), RECV_HASH, _le64(manifestVersion)
         );
         return
             commitment == bytes32(0) ? abi.encodePacked(head, uint8(0)) : abi.encodePacked(head, uint8(32), commitment);
@@ -39,12 +50,24 @@ abstract contract Runtimes3TestBase is Test {
         return _record(1, 7, 3, 2, bytes32(0));
     }
 
-    function _bundleContent() internal pure returns (bytes memory) {
-        bytes[] memory msgs = new bytes[](2);
+    function _payloads() internal pure returns (bytes[] memory msgs) {
+        msgs = new bytes[](2);
         msgs[0] = hex"0a03010203";
         msgs[1] = hex"0a020405";
+    }
+
+    function _bundleContent() internal pure returns (bytes memory) {
         ClprTypes.QueueMetadata memory m;
-        return ClprProtobuf.encodeBundleContent(m, msgs);
+        return ClprProtobuf.encodeBundleContent(m, _payloads());
+    }
+
+    /// @dev sha256 running hash over `_payloads()` from `previous`.
+    function _chainedSentHash(bytes32 previous) internal pure returns (bytes32 h) {
+        h = previous;
+        bytes[] memory p = _payloads();
+        for (uint256 i; i < p.length; ++i) {
+            h = sha256(abi.encodePacked(h, sha256(p[i])));
+        }
     }
 
     function _manifest(bytes memory service) internal pure returns (bytes memory) {

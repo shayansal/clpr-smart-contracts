@@ -33,9 +33,9 @@ All three keep the queue record in one byte layout, the Move family's BCS `Chann
 | Finality source | CometBFT commit: more than 2/3 of the voting power signed the header (Ed25519, 10 validators) | the Ethereum sync committee signs the header; Fuel block id committed in `FuelChainState`, final after `TIME_TO_FINALIZE` (1 day) | BLS12-381 aggregated endorsements of at least 2/3 of the period's generating balance (feature 25) |
 | State commitment | header `app_hash` → `move` store root → IAVL leaf `0x21 ‖ handle ‖ 0x03 ‖ channelId` | committed block → `prevRoot` (block history) → `messageOutboxRoot` → message | block header (`stateHash`, `transactionsRoot`); no state proof (blocked) |
 | Trust (one line) | > 2/3 of each Initia validator set the anchor reaches, a bootstrap set, an anchor inside the unbonding period | **the Ethereum sync committee and the Fuel committer key**; `FuelChainState` admins can pause or upgrade (the verifier then stops) | the generator set (BLS keys and balances) is **trusted input** |
-| Typical bundle | 3,459,586 gas, 1,508 B header check (PR #6 accumulator, live) + 532,778 gas, 3,460 B store proof (this branch, live) | 1,425,174 gas, 12,932 B (live, full chain) | 244,916 gas, 1,796 B (live, finality only) |
+| Typical bundle | 3,459,586 gas, 1,508 B header check (PR #6 accumulator, live) + 532,778 gas, 3,460 B store proof (this branch, live) | 1,425,587 gas, 12,932 B (live, full chain) | 244,916 gas, 1,796 B (live, finality only) |
 | Rotation | in the same transaction as a bundle at the rotation header; each missed change is one more header check (3,459,586 gas inline, or 3,587,458 gas per `accumulate`) | a sync-committee rotation adds 4,777,762 gas and 66,080 B to the L1 half (live) | trusted set update once per generation period (no on-chain rotation) |
-| Contract size (runtime) | InitiaMoveVerifier 15,345 B; needs `CometBftCommitAccumulator` 13,104 B + `Ed25519Verifier` 12,206 B (PR #6) | FuelVerifier 15,275 B; `EthL1StateVerifier` 11,593 B | WavesFinalityVerifier 5,948 B |
+| Contract size (runtime) | InitiaMoveVerifier 15,345 B; needs `CometBftCommitAccumulator` 13,104 B + `Ed25519Verifier` 12,206 B (PR #6) | FuelVerifier 15,576 B; `EthL1StateVerifier` 11,593 B | WavesFinalityVerifier 5,948 B |
 | Status | live-verified on Initia mainnet (2026-10-01): state path on-chain, commit signatures off-chain here and on-chain with PR #6 | live-verified on Fuel Ignition + Ethereum mainnet (2026-10-01) | finality live-verified on Waves testnet (2026-10-01); CLPR state path **blocked** |
 
 "Live-verified" means the production contracts ran on real chain data replayed on anvil. No CLPR Service exists on
@@ -299,6 +299,10 @@ Trust anchor (260 bytes): the `EthBeaconLightClient` anchor
 | 8 | bundleContent | bytes | protobuf `ClprBundleContent` |
 | 9 | manifestPreimage | bytes, optional | bound to the record's commitment |
 
+`endpointManifestProofBytes` at `verifyConfig` is RLP `[messageProof, manifestPreimage]`: the 8-item proof below of a
+service message `MANIFEST_TAG ‖ keccak256(manifest)` (`MANIFEST_TAG = keccak256("clpr.fuel.endpoint-manifest")`),
+verified under the genesis anchor; empty means bring-up.
+
 `verifyFuelMessage(proof, anchor)` takes items 0 to 7 and returns the message, block height, commit height and commit
 timestamp.
 
@@ -348,10 +352,10 @@ All live numbers are `eth_estimateGas` on anvil (Osaka rules) with the productio
 | Initia header check, `CometBftCommitAccumulator.checkHeader`, 5 Ed25519 signatures of 10 validators | 3,459,586 | 1,508 B | same fixture on PR #6 (`bab3ae6`), measured separately |
 | Initia `accumulate` of the same commit (gas used) | 3,587,458 | – | same, PR #6 |
 | Initia inline bundle, estimated as the sum of the two rows above | ≈ 3,992,000 | ≈ 4,968 B | sum of measurements; the store-proof row includes the mock's own header parse, so the sum is an upper estimate |
-| Fuel full message proof (`verifyFuelMessage`) | 1,425,174 | 12,932 B | `fuel-live.spec.ts`, 508/512 signers, block-history proof of 24 siblings |
+| Fuel full message proof (`verifyFuelMessage`) | 1,425,587 | 12,932 B | `fuel-live.spec.ts`, 508/512 signers, block-history proof of 24 siblings |
 | Fuel L1 half alone (`verifyL1State`) | 445,152 | 2,884 B | `fuel-live.spec.ts` |
 | Fuel L1 half with a real sync-committee rotation | 5,222,914 | 68,964 B | `fuel-live.spec.ts` |
-| Fuel bundle with a rotation, estimated | ≈ 6,202,936 | ≈ 79,012 B | sum of the full proof and the rotation delta (different execution blocks, so not one call) |
+| Fuel bundle with a rotation, estimated | ≈ 6,203,349 | ≈ 79,012 B | sum of the full proof and the rotation delta (different execution blocks, so not one call) |
 | Waves finality of one block (5 generators, 2 endorsers) | 244,916 | 1,796 B | `waves-live.spec.ts`, testnet height 4284331 |
 
 `verifyBundle` runs the same paths plus the record and bundle-content decode; it is exercised on synthetic data in
@@ -382,7 +386,8 @@ the Foundry tests, not on live data (no CLPR Service exists on these chains).
 * The commit ring holds 240 commits (about 30 days); an older commit is overwritten and can no longer be proven.
 * The Sway CLPR contract does not exist; it must send `channelId ‖ record` as a message whenever the record changes
   (one MessageOut receipt per change, paid on Fuel).
-* `verifyConfig` does not take a manifest proof; the first manifest arrives with a bundle.
+* At `verifyConfig` the manifest is proven from a service-level Fuel message `MANIFEST_TAG ‖ keccak256(manifest)`;
+  the Sway contract must emit one whenever its manifest changes.
 * The live message is from Fuel's bridge (no CLPR contract), so it is checked through `verifyFuelMessage`.
 
 **Waves (blocked for CLPR)**
@@ -417,8 +422,9 @@ Each verifier pins layout facts that a source-chain upgrade can move. Under the 
 ## Running it
 
 ```sh
-# unit tests (Initia 20, Fuel 22, Waves 11)
+# unit tests (Initia 20, Fuel 22, Waves 11) and IClprVerifier compliance (Initia 21, Fuel 22)
 forge test --match-path 'test/verifiers/evm/runtimes3/*'
+forge test --match-path 'test/verifiers/compliance/{Initia,Fuel}ComplianceTest.t.sol'
 
 # live replays on anvil (forge build first)
 forge build

@@ -20,7 +20,7 @@ Family README: [New-runtime verifiers, batch 3](../../src/verifiers/evm/runtimes
 | Finality source | the Ethereum sync committee signs the header; `FuelChainState` commit + 1-day delay (`TIME_TO_FINALIZE`) |
 | Verifier | [`FuelVerifier`](../../src/verifiers/evm/runtimes3/FuelVerifier.sol) + [`EthL1StateVerifier`](../../src/verifiers/evm/ethereum/EthL1StateVerifier.sol) |
 | Trust tier | Ethereum sync committee and the Fuel committer key; `FuelChainState` admins can pause or upgrade (the verifier stops) |
-| Typical bundle | 1,425,174 gas, 12,932 B (live, full chain) |
+| Typical bundle | 1,425,587 gas, 12,932 B (live, full chain) |
 | Rotation | sync-committee rotation adds 4,777,762 gas and 66,080 B (live); about 6.2 M gas and 79 KB with a bundle (estimate) |
 
 ## Deployment profile

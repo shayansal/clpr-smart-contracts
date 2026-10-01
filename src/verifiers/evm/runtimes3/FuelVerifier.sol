@@ -55,11 +55,15 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 ///   8: bundleContent      protobuf ClprBundleContent
 ///  (9: manifestPreimage   bound to the record's endpoint-manifest commitment) ]
 /// ```
+/// At `verifyConfig` the manifest comes from a service-level message `MANIFEST_TAG ‖ commitment`
+/// (the record of a channel that does not exist yet cannot carry it).
 contract FuelVerifier is ClprQueueRecordVerifier {
     uint256 internal constant BUNDLE_FIELDS = 9;
     uint256 internal constant BUNDLE_FIELDS_WITH_MANIFEST = 10;
     uint256 internal constant MESSAGE_FIELDS = 5;
     uint256 internal constant QUEUE_OFFSET = 32;
+    /// @dev First word of a service-level manifest message: `MANIFEST_TAG ‖ keccak256(manifest)`.
+    bytes32 public constant MANIFEST_TAG = keccak256("clpr.fuel.endpoint-manifest");
     /// @dev ERC-1967 implementation slot.
     bytes32 internal constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
@@ -120,7 +124,7 @@ contract FuelVerifier is ClprQueueRecordVerifier {
     error BlockNotInHistory();
     error MessageNotInBlock();
     error InvalidMessage();
-    error ManifestProofUnsupported();
+    error InvalidManifestMessage();
 
     constructor(Profile memory p) {
         if (
@@ -212,7 +216,6 @@ contract FuelVerifier is ClprQueueRecordVerifier {
         )
     {
         if (configProofBytes.length == 0) revert InvalidPayloadShape();
-        if (endpointManifestProofBytes.length != 0) revert ManifestProofUnsupported();
         bytes memory ledgerConfiguration;
         (initialTrustAnchor, initialTrustAnchorId, ledgerConfiguration) =
             L1_STATE_VERIFIER.genesisTrustAnchor(configProofBytes, channelId);
@@ -229,7 +232,9 @@ contract FuelVerifier is ClprQueueRecordVerifier {
         chainId = lc.chainId;
         peerConfigNanos = lc.nanosSinceEpoch;
         throttles = lc.throttles;
-        endpointManifest = _uninitializedEndpointManifest(serviceAddress);
+        endpointManifest = endpointManifestProofBytes.length == 0
+            ? _uninitializedEndpointManifest(serviceAddress)
+            : _verifyConfigManifest(endpointManifestProofBytes, initialTrustAnchor, serviceAddress);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -267,7 +272,29 @@ contract FuelVerifier is ClprQueueRecordVerifier {
     //   Internal
     // ─────────────────────────────────────────────────────────────────────────
 
-    function _verifyMessage(Memory.Slice[] memory items, bytes calldata trustAnchor)
+    /// @dev Config-time manifest: RLP `[messageProof, manifestPreimage]`, where `messageProof` is the
+    ///      8-item {verifyFuelMessage} proof of a service message `MANIFEST_TAG ‖ keccak256(manifest)`
+    ///      verified under the genesis anchor.
+    function _verifyConfigManifest(bytes calldata proof, bytes memory anchor, bytes memory serviceAddress)
+        internal
+        view
+        returns (ClprTypes.ClprEndpointManifest memory)
+    {
+        bytes memory proofMem = proof;
+        Memory.Slice[] memory outer = RLP.decodeList(proofMem);
+        if (outer.length != 2) revert InvalidPayloadShape();
+        bytes memory inner = RLP.readBytes(outer[0]);
+        Memory.Slice[] memory items = RLP.decodeList(inner);
+        if (items.length != BUNDLE_FIELDS - 1) revert InvalidPayloadShape();
+        (FuelMessage memory m,,) = _verifyMessage(items, anchor);
+        if (
+            m.sender != _bytes32Address(serviceAddress) || m.recipient != MESSAGE_RECIPIENT || m.amount != 0
+                || m.data.length != 64 || _word(m.data, 0) != MANIFEST_TAG
+        ) revert InvalidManifestMessage();
+        return _bindManifest(RLP.readBytes(outer[1]), _word(m.data, 32), serviceAddress);
+    }
+
+    function _verifyMessage(Memory.Slice[] memory items, bytes memory trustAnchor)
         internal
         view
         returns (FuelMessage memory m, bytes memory newTrustAnchor, bytes memory newTrustAnchorId)
