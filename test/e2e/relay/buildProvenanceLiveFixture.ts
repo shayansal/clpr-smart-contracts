@@ -37,25 +37,39 @@ export const CONTRACT = "pb1msvy4f0vcdm9kx4x56lrk5ctlnh88ag84k4ggskywzwvf2nzlmtq
 export const MAP_NAMESPACE = "sb1";
 export const MAP_KEY = "pb1whzz6j94tfsz2nyhqd2xu4ctfru28lj4zaa5npr5w39r6yy2slnsvyft3v";
 
-export function fixtureKeys(): {name: string; key: Buffer}[] {
-    const c = canonicalAddress(CONTRACT);
+/** A CometBFT + wasmd chain and the real contract whose storage the fixture proves. */
+export interface CosmWasmChainSpec {
+    name: string;
+    rpc: string;
+    channelId: Hex;
+    contract: string; // bech32, 32-byte address
+    mapNamespace: string; // cw-storage-plus Map namespace with a known live entry
+    mapKey: string; // that entry's key (UTF-8)
+}
+
+export const PROVENANCE: CosmWasmChainSpec = {
+    name: "provenance", rpc: RPC, channelId: CHANNEL_ID, contract: CONTRACT, mapNamespace: MAP_NAMESPACE, mapKey: MAP_KEY
+};
+
+export function fixtureKeys(c: CosmWasmChainSpec = PROVENANCE): {name: string; key: Buffer}[] {
+    const a = canonicalAddress(c.contract);
     return [
-        {name: "queue", key: queueRecordKey(c, Buffer.from(CHANNEL_ID.slice(2), "hex"))},
-        {name: "cw2", key: contractStoreKey(c, Buffer.from("contract_info"))},
-        {name: "map", key: contractStoreKey(c, mapKey(MAP_NAMESPACE, Buffer.from(MAP_KEY)))}
+        {name: "queue", key: queueRecordKey(a, Buffer.from(c.channelId.slice(2), "hex"))},
+        {name: "cw2", key: contractStoreKey(a, Buffer.from("contract_info"))},
+        {name: "map", key: contractStoreKey(a, mapKey(c.mapNamespace, Buffer.from(c.mapKey)))}
     ];
 }
 
-async function rpcJson(p: string): Promise<any> {
-    const r = await fetch(RPC + p, {signal: AbortSignal.timeout(30_000)});
+async function rpcJson(rpc: string, p: string): Promise<any> {
+    const r = await fetch(rpc + p, {signal: AbortSignal.timeout(30_000)});
     if (!r.ok) throw new Error(`${p}: ${r.status}`);
     return r.json();
 }
 
 /** Most recent height ≤ tip-5 whose header changes the validator set, scanning `maxBlocks` back. */
-async function findRotation(tip: bigint, maxBlocks = 6000n): Promise<bigint | undefined> {
+async function findRotation(rpc: string, tip: bigint, maxBlocks = 6000n): Promise<bigint | undefined> {
     for (let max = tip - 5n; max > tip - maxBlocks; max -= 20n) {
-        const j = await rpcJson(`/blockchain?minHeight=${max - 19n}&maxHeight=${max}`);
+        const j = await rpcJson(rpc, `/blockchain?minHeight=${max - 19n}&maxHeight=${max}`);
         const metas = j.result.block_metas as any[];
         for (const m of metas) {
             if (m.header.validators_hash !== m.header.next_validators_hash) return BigInt(m.header.height);
@@ -64,36 +78,36 @@ async function findRotation(tip: bigint, maxBlocks = 6000n): Promise<bigint | un
     return undefined;
 }
 
-async function captureHeight(H: bigint) {
-    const [commit, vals] = await Promise.all([fetchCommit(RPC, H), fetchValidators(RPC, H)]);
+async function captureHeight(c: CosmWasmChainSpec, H: bigint) {
+    const [commit, vals] = await Promise.all([fetchCommit(c.rpc, H), fetchValidators(c.rpc, H)]);
     const enc = encodeSignedHeader(commit.sh, vals.vals); // throws unless hash, set and >2/3 check out
     const abci = [];
-    for (const k of fixtureKeys()) abci.push((await fetchAbciProof(RPC, WASM_STORE, k.key, H - 1n)).json);
+    for (const k of fixtureKeys(c)) abci.push((await fetchAbciProof(c.rpc, WASM_STORE, k.key, H - 1n)).json);
     return {commit: commit.json, validators: vals.json, abci, signers: enc.signerIndices.length, n: vals.vals.length};
 }
 
-export async function capture() {
-    const st = await fetchStatus(RPC);
+export async function capture(c: CosmWasmChainSpec = PROVENANCE) {
+    const st = await fetchStatus(c.rpc);
     const tip = BigInt(st.sync_info.latest_block_height);
-    const R = await findRotation(tip);
+    const R = await findRotation(c.rpc, tip);
     if (R === undefined) throw new Error("no validator-set rotation in the scanned window");
     const B = R + 2n;
-    const r = await captureHeight(R);
-    const b = await captureHeight(B);
+    const r = await captureHeight(c, R);
+    const b = await captureHeight(c, B);
     const rh = r.commit.result.signed_header.header;
     const bh = b.commit.result.signed_header.header;
     if (bh.validators_hash !== rh.next_validators_hash) throw new Error("B is not signed by R's next set");
     return {
-        chain: "provenance",
+        chain: c.name,
         chainId: rh.chain_id,
-        rpc: RPC,
+        rpc: c.rpc,
         nodeVersion: st.node_info.version,
         capturedAt: new Date().toISOString(),
-        channelId: CHANNEL_ID,
-        contract: CONTRACT,
-        mapNamespace: MAP_NAMESPACE,
-        mapKey: MAP_KEY,
-        keys: fixtureKeys().map((k) => ({name: k.name, key: "0x" + k.key.toString("hex")})),
+        channelId: c.channelId,
+        contract: c.contract,
+        mapNamespace: c.mapNamespace,
+        mapKey: c.mapKey,
+        keys: fixtureKeys(c).map((k) => ({name: k.name, key: "0x" + k.key.toString("hex")})),
         meta: {
             rotationHeight: R.toString(), bundleHeight: B.toString(),
             validators: r.n, signersAtR: r.signers, signersAtB: b.signers,

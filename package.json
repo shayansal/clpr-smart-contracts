@@ -19,6 +19,8 @@
     "cometbft-live:refresh": "tsx test/e2e/relay/buildCometBftLiveFixture.ts",
     "test:e2e:provenance-live": "vitest run test/e2e/tests/verifiers/provenance-live.spec.ts",
     "provenance-live:refresh": "tsx test/e2e/relay/buildProvenanceLiveFixture.ts",
+    "test:e2e:zigchain-live": "vitest run test/e2e/tests/verifiers/zigchain-live.spec.ts",
+    "zigchain-live:refresh": "tsx test/e2e/relay/buildZigchainLiveFixture.ts",
     "test:e2e:polygon-live": "vitest run test/e2e/tests/verifiers/polygon-live.spec.ts",
     "polygon-live:refresh": "tsx test/e2e/relay/buildPolygonLiveFixture.ts",
     "test:e2e:thorchain-live": "vitest run test/e2e/tests/verifiers/thorchain-live.spec.ts",
