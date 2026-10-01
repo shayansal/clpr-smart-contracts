@@ -46,7 +46,9 @@
     "verify:establish-channel": "tsx test/verification-inputs/establish-channel.ts",
     "verify:proof": "tsx test/verification-inputs/proof-verification.ts",
     "test:e2e:cardano-live": "vitest run test/e2e/tests/verifiers/cardano-live.spec.ts",
-    "cardano-live:refresh": "tsx test/e2e/relay/buildCardanoLiveProof.ts --refresh"
+    "cardano-live:refresh": "tsx test/e2e/relay/buildCardanoLiveProof.ts --refresh",
+    "test:e2e:algorand-live": "vitest run test/e2e/tests/verifiers/algorand-live.spec.ts",
+    "algorand-live:refresh": "tsx test/e2e/relay/buildAlgorandLiveProof.ts --refresh"
   },
   "dependencies": {
     "@ethereumjs/rlp": "^10.1.2",
