@@ -1,280 +1,379 @@
-# CometBFT verifier family
+# CometBFT verifier family (EVM store)
 
-> **Source**: [CometBftVerifier.sol](./CometBftVerifier.sol) ·
-> light client [CometBftLightClient.sol](./CometBftLightClient.sol) (shared) ·
-> multi-transaction commits [CometBftCommitAccumulator.sol](./CometBftCommitAccumulator.sol) ·
-> shared libraries [CometBftLib](../../../libraries/proof/cometbft/CometBftLib.sol),
-> [CometBftProofCodec](../../../libraries/proof/cometbft/CometBftProofCodec.sol),
-> [Ics23Lib](../../../libraries/proof/cometbft/Ics23Lib.sol) ·
-> Ed25519: [Ed25519Verifier](../sei/Ed25519Verifier.sol)
-> **Interface**: [IClprVerifier.sol](../../../interfaces/IClprVerifier.sol)
+A "CometBFT chain → Hiero" verifier. `CometBftVerifier` runs on Hedera's EVM and proves two
+things: (1) CometBFT finality, meaning validators holding more than 2/3 of the validator set's
+voting power signed the header, and (2) the peer CLPR Service's queue storage under that header's
+`app_hash`. It serves every CometBFT chain whose CLPR Service is an **EVM contract kept in a Cosmos
+SDK IAVL store** (Cronos, Mezo, MANTRA, Injective, Sei, and the Stable, Kava and 0G profiles in
+progress). The chain is a deploy-time `Profile`, not a subclass.
 
-A "CometBFT chain → Hiero" verifier: it runs on Hedera's EVM and checks (1) CometBFT finality,
-meaning more than 2/3 of the validator set's voting power signed the header, and (2) the peer CLPR
-Service's queue storage in that header's `app_hash`.
+The same light client (`CometBftLightClient`) and commit accumulator (`CometBftCommitAccumulator`)
+also serve the CometBFT chains whose state is not an EVM store. Each has its own README:
+[Provenance](../provenance/README.md) and [THORChain](../thorchain/README.md) (`CosmWasmVerifier`),
+[Polygon PoS](../polygon/README.md) (`PolygonPosVerifier`) and dYdX (`CosmosModuleVerifier`, on
+branch `feat/dydx-xclpr`). One page per chain is in [docs/chains](../../../../docs/chains/README.md).
 
-One contract, `CometBftVerifier`, serves every CometBFT chain whose CLPR Service is an **EVM
-contract kept in a Cosmos SDK IAVL store**. The chain is a deploy-time `Profile`, not a subclass.
-`SeiCometBftVerifier` (../sei) is the older Sei-only member and now shares its protobuf decoders
-with this one through `CometBftProofCodec`. It keeps its own anchor format (the full validator
-list) so the Sei relay stays compatible.
+## 1. At a glance
 
-## 1. Chains
+| | |
+|---|---|
+| Direction | `<CometBFT chain> → Hiero` |
+| Chains, live-verified | Cronos `cosmos:cronosmainnet_25-1`, Mezo `cosmos:mezo_31612-1`, MANTRA `cosmos:mantra-1`, Injective `cosmos:injective-1` (mainnet, 2026-10-01) |
+| Chains, family-covered | Sei (store prefix `0x03`; production path today is `SeiCometBftVerifier`) |
+| Chains, in progress | Stable, Kava, 0G (profiles not yet recorded) |
+| Finality source | CometBFT commit: signatures of more than 2/3 of the voting power over the canonical precommit |
+| Trust (one line) | Honest 2/3 of each validator set the anchor reaches, a deploy-time bootstrap checkpoint, and an anchor kept inside the unbonding period |
+| Typical bundle | 7.76M–12.84M gas, 12.7–16.3 KB calldata (live, §7) |
+| Rotation | Same transaction as a typical bundle at the rotation header (MANTRA 7.76M, Injective 12.60M, live). A missed rotation adds one hop: 4.8M (Cronos) to 10.1M (Injective) |
+| Contract sizes | `CometBftVerifier` 24,126 B (450 B under EIP-170); `Ed25519Verifier` 12,206 B |
+| Status | Live `verifyBundle` on Cronos and Mezo mainnet data (this branch) and MANTRA and Injective mainnet data (branch `feat/rwaprofiles-verifier`), all recorded 2026-10-01 |
 
-Every row below comes from that chain's live public RPC on 2026-10-01. The fixtures are in
-`test/e2e/fixtures/cometbft-live/`. Protocol details were checked against the source named in §8.
-
-| Chain | Consensus | Key scheme | Validators | Min. signers for >2/3 | App state / how proven | Status |
+| Chain | CometBFT | Keys | Validators | Signers for > 2/3 | EVM state | Status |
 |---|---|---|---|---|---|---|
-| **Cronos** | CometBFT 0.38.13 | Ed25519 | 10 | **7** | EVM in IAVL store `evm`, key `0x02‖addr‖slot` (Ethermint) → ICS-23 | **Covered.** Live `verifyBundle` 7.84M gas |
-| **Mezo** | CometBFT 0.38.19 | Ed25519 | 21 (all power 1) | **15** | EVM in IAVL store `evm`, key `0x02‖addr‖slot` (Evmos fork) → ICS-23 | **Covered.** Live `verifyBundle` 12.84M gas |
-| Sei | CometBFT (sei-tendermint) | Ed25519 | — | — | EVM in IAVL store `evm`, key `0x03‖addr‖slot` | Covered by profile (`0x03`); production path is `SeiCometBftVerifier` |
-| **Polygon PoS** (Heimdall v2) | CometBFT 0.38.22, Polygon fork | **secp256k1eth**: 65 B key, r‖s‖v over keccak256 | 104 | **10** | Heimdall app state is not EVM. Bor (EVM, MPT) block hashes are in the `milestone` store, key `0x81‖count` | **Covered** by `PolygonPosVerifier` ([../polygon](../polygon/README.md)): milestone → Bor header → MPT. Live full bundle 3.45M gas |
-| **dYdX v4** | CometBFT 0.38.5 | Ed25519 | 21 | 10 | Native Cosmos modules only. No `wasm` store, no EVM (checked: `no such store: wasm`) | Light client fits (6.75M). No place for a CLPR Service contract |
-| **Provenance** | CometBFT 0.38.22 | Ed25519 | 100 | 18 | CosmWasm: `wasm` store, key `0x03‖contract(32 B)‖key` | **Covered** by `CosmWasmVerifier` ([../provenance](../provenance/README.md)). Live full bundle in one tx 13.12M; split mode 0.52M + `accumulate` txs |
-| **THORChain** | CometBFT 0.38.19 | Ed25519 | 99 (all power 100) | **67** | CosmWasm `wasm` store (App Layer; whitelist-only upload, globally halted on 2026-10-01) | Commit alone is 43.6M gas in one tx. **Covered split** ([../thorchain](../thorchain/README.md)): `CometBftCommitAccumulator` over 4 txs (11.1–11.9M each, live), then `CosmWasmVerifier` by header hash, 0.58M (live full bundle) |
-| **Arc** (Circle) | **Malachite** (Tendermint algorithm, not CometBFT) | Ed25519 over **SSZ** votes | 22 (testnet) | 11 | EVM (reth), **MPT**. Validator set is EVM storage of `ValidatorRegistry` at `0x3600…0002` | Live certificate checked off-chain. Different wire format, so a separate adapter (§7) |
+| Cronos | 0.38.13 | Ed25519 | 10 | 7 | store `evm`, key `0x02‖addr‖slot` (Ethermint) | live-verified |
+| Mezo | 0.38.19 | Ed25519 | 21 (all power 1) | 15 | store `evm`, key `0x02‖addr‖slot` (Evmos fork) | live-verified |
+| MANTRA | 0.38.22 (node) | Ed25519 | 38 | 8 | store `evm`, key `0x02‖addr‖slot` (cosmos/evm v0.6, MANTRA fork) | live-verified |
+| Injective | v1.0.1 (InjectiveLabs fork, source private) | Ed25519 | 45 | 15 | store `evm`, key `0x02‖addr‖slot` (Injective `x/evm`) | live-verified |
+| Sei | sei-tendermint | Ed25519 | not recorded | not recorded | store `evm`, key `0x03‖addr‖slot` | family-covered |
+| Stable, Kava, 0G | not recorded | not recorded | not recorded | not recorded | not recorded | in progress |
 
-"Min. signers" uses the live validator set sorted by power. The relay sends exactly that many
-signatures (§3.4).
+"Signers for > 2/3" uses the live validator set sorted by power. The relay sends exactly that many
+signatures (§2, step 4).
 
-## 2. Verification chain
+## 2. How it works
 
 ```mermaid
-flowchart LR
-    A["Trust anchor (40 B)<br/>validatorSetHash ‖ height"] --> H["hops (optional)<br/>header signed by current set<br/>→ next_validators_hash, height+1"]
-    H --> V["validator set (calldata)<br/>raw SimpleValidator leaves<br/>simple-Merkle == working hash"]
-    V --> C["signed header<br/>14-field header hash<br/>> 2/3 commit (Ed25519 | ecrecover)"]
-    C --> M["ICS-23 Tendermint spec<br/>store 'evm' → store root<br/>rooted at app_hash"]
-    M --> I["ICS-23 IAVL proofs<br/>prefix ‖ service ‖ slot<br/>existence or non-existence"]
-    I --> Q["QueueMetadata + payloads<br/>new anchor if the set changes"]
+flowchart TD
+    A["Trust anchor, 40 B<br/>validatorSetHash ‖ height"]
+    H["Hops, optional<br/>each a header signed by the current set"]
+    V["Validator set in calldata<br/>SimpleValidator leaves"]
+    S["Signed header<br/>14-field header hash"]
+    C["Commit signatures<br/>Ed25519 or secp256k1eth"]
+    M["Multistore proof<br/>ICS-23 Tendermint spec"]
+    I["IAVL proofs, one per slot<br/>ICS-23 IAVL spec"]
+    Q["QueueMetadata + payloads<br/>new anchor if the set changed"]
+    A -->|"set hash and height floor"| H
+    H -->|"working anchor = next_validators_hash, height + 1"| V
+    V -->|"RFC 6962 Merkle root == working hash == header.validators_hash"| S
+    S -->|"chain_id matches profile, height >= floor"| C
+    C -->|"signed power > 2/3 of total, in index order"| M
+    M -->|"store 'evm' root under app_hash"| I
+    I -->|"key = prefix ‖ service ‖ slot, existence or non-existence"| Q
 ```
 
-`verifyBundle(proof, anchor, channelContext)`:
+`verifyBundle(proofBytes, trustAnchor, channelContext)`:
 
-1. Decode the anchor: `validatorSetHash(32) ‖ height(8, big-endian)`. It means "this set signs every
-   header at or above `height`".
-2. Apply hops. Each hop is a header signed by more than 2/3 of the current set at or above the
-   current height. The working anchor then becomes `(next_validators_hash, height + 1)`.
-3. Hash the supplied validator set and require it to equal the working hash and the header's
-   `validators_hash`.
-4. Rebuild the header hash on-chain. Verify commit signatures over the canonical precommit
-   (`CanonicalVote{PRECOMMIT, height, round, BlockID{hash, parts}, timestamp, chain_id}`,
-   length-delimited) until more than 2/3 of the set's total power has signed. The chain id must
-   match the profile.
-5. Check the multistore proof: store key → store root, verified against `app_hash` with the ICS-23
-   Tendermint spec.
-6. Check one IAVL proof per slot, for key `prefix ‖ serviceAddress(20) ‖ slot(32)`. The slots must
-   be the channel's real `Channel` slots (+1, +2, +4, +5, +16), plus the last-message running hash
-   when messages are present. Absent slots need a non-existence proof and read as zero.
-7. If `next_validators_hash` differs from the anchor's hash, return the new anchor
-   `(next_validators_hash, height + 1)`.
+1. Decode the anchor `validatorSetHash(32) ‖ height(8, big-endian)`: "this set signs every header
+   at or above `height`" (`CometBftVerifier.sol:_decodeAnchor`).
+2. Apply hops. Each hop is a validator set and a header signed by more than 2/3 of it, at or above
+   the working height. The working anchor becomes `(next_validators_hash, height + 1)`
+   (`CometBftLightClient.sol:_applyHops`).
+3. Hash the supplied validator set as CometBFT does (simple Merkle over the raw `SimpleValidator`
+   bytes) and require it to equal the working hash (`CometBftLightClient.sol:_parseValidatorSet`,
+   `_decodeValidatorSet`).
+4. Rebuild the header hash on-chain, check `chain_id`, `validators_hash` and the height floor, and
+   verify commit signatures over the canonical precommit
+   (`CanonicalVote{PRECOMMIT, height, round, BlockID, timestamp, chain_id}`, length-delimited). The
+   loop walks validators in index order and stops once more than 2/3 of the total power has signed
+   (`CometBftLightClient.sol:_verifySignedHeader`, `_checkHeaderBinding`, `_verifyCommit`,
+   `_verifyVote`). CometBFT sorts sets by power, so the first signers are the largest.
+5. Verify the multistore proof: store key `evm` → store root, against `app_hash`, with the ICS-23
+   Tendermint spec (`CometBftVerifier.sol:_verifyStateProof`, `Ics23Lib.verifyMembershipTendermint`).
+6. Verify one IAVL proof per slot, for key `prefix ‖ serviceAddress(20) ‖ slot(32)`. Absent slots
+   need a non-existence proof and read as zero (`CometBftVerifier.sol:_verifyStateProof`,
+   `_checkStorageKey`).
+7. Bind the proven slots to the channel's real `Channel` slots (+1, +2, +4, +5, +16) and, with
+   messages, the last message's running hash (`CometBftVerifier.sol:_bindChannelSlots`). Decode the
+   payloads (`ClprEvmBundleVerifier._decodeBundleContent`) and the optional manifest
+   (`_verifyManifest`).
+8. If `next_validators_hash` differs from the anchor's hash, return the new anchor
+   `(next_validators_hash, height + 1)` (`CometBftVerifier.sol:verifyBundle`).
 
-`verifyConfig` runs the same chain, starting from the deploy-time checkpoint
+`verifyConfig` runs the same chain from the deploy-time checkpoint
 `(BOOTSTRAP_VALIDATORS_HASH, BOOTSTRAP_HEIGHT)`. It proves ClprService's `_config.serviceAddress`
-(slot 25, short-bytes layout `addr ‖ 0…0 ‖ 0x28`) by **both slot number and value**.
+(slot 25, short-bytes layout `addr ‖ 0…0 ‖ 0x28`) by slot number and value.
 
-## 3. Design choices
+## 3. Bundle lifecycle
 
-### 3.1 Compact anchor, keys in calldata
-
-`SeiCometBftVerifier` stores `abi.encode(chainId, validators[])` as the anchor, which is about 64 B
-per validator. ClprService keeps the anchor in channel storage. Each bundle then pays an SLOAD per
-32 B (2,100 gas cold), and each rotation pays an SSTORE per 32 B. At 100 validators that is about
-200 slots: ~0.4M gas on every bundle and ~4M gas on each rotation.
-
-Here the anchor is two slots. The keys arrive in calldata as the exact `SimpleValidator` bytes that
-CometBFT hashes (`{1: PublicKey{oneof}, 2: voting_power}`). The verifier hashes those bytes and
-decodes them strictly, with nothing re-encoded. 100 Ed25519 leaves are about 4 KB of calldata
-(~65k gas).
-
-### 3.2 Profiles
-
-```solidity
-struct Profile {
-    string  chainId;                 // "cronosmainnet_25-1", "mezo_31612-1", …
-    bytes   storeKey;                // "evm"
-    uint8   evmStateKeyPrefix;       // 0x02 Ethermint (Cronos, Mezo) · 0x03 Sei
-    KeyScheme keyScheme;             // ED25519 | SECP256K1_ETH
-    address ed25519Verifier;         // required for ED25519
-    bytes32 bootstrapValidatorsHash; // weak-subjectivity checkpoint for verifyConfig
-    uint64  bootstrapHeight;
-}
+```mermaid
+sequenceDiagram
+    participant Src as CometBFT chain RPC
+    participant Rel as Relayer
+    participant Svc as ClprService on Hedera
+    participant Ver as CometBftVerifier
+    participant Ed as Ed25519Verifier
+    Rel->>Src: /status, /commit?height=H, /validators?height=H
+    Rel->>Src: abci_query /store/evm/key prove=true at H-1 (multistore + IAVL per slot)
+    Note over Rel: build CometBftBundlePayload with the smallest power-ordered signer subset
+    Rel->>Svc: submitBundle(channelId, proofBytes)
+    Svc->>Ver: verifyBundle(proofBytes, trustAnchor, channelContext)
+    loop each needed signature (ED25519 scheme)
+        Ver->>Ed: verify(pubKey, signBytes, signature)
+    end
+    Ver-->>Svc: QueueMetadata, payloads, new anchor if the set changed
+    Note over Svc: progress and replay checks, delivery, then store the new anchor
 ```
 
-### 3.3 Key schemes
+A rotation is the same transaction at the last header the old set signs (§6). A relay that missed
+it adds hops to the payload, or sends one bundle per rotation header in its own transaction.
+
+## 4. Trust model
+
+Trusted:
+- **Honest supermajority.** No validator set the anchor reaches ever had more than 2/3 of its power
+  sign two conflicting headers.
+- **Bootstrap checkpoint.** `verifyConfig` starts from `(bootstrapValidatorsHash, bootstrapHeight)`,
+  chosen by the deployer. A config proof cannot supply its own validator set.
+- **Unbonding period.** This is a sequential light client with no trusting period and no check of
+  header time against `block.timestamp`. A set that has fully unbonded could sign a forged hop at no
+  cost, so relays must keep each channel's anchor within the chain's unbonding period by bundling at
+  every rotation.
+- **Ed25519 verifier contract.** `Ed25519Verifier` is the pure-Solidity verifier pinned in the
+  profile (Hedera has no Ed25519 precompile).
+
+Not trusted:
+- The relayer. Every header, set, key and value is checked on-chain.
+- Block proposers. Only the commit counts.
+
+To forge a bundle an attacker must control more than 2/3 of the voting power of a set the anchor
+reaches, or a set older than the unbonding period that a stale anchor still names.
+
+Other properties:
+- **Peer identity** comes from channel context and proven storage, as in the other EVM verifiers.
+- **No verifier state.** Headers below the anchor height are rejected; headers from a replaced set
+  fail the set-hash check. An older header at or above the anchor height still verifies, and
+  ClprService rejects its stale metadata through its progress and replay checks
+  (`BundleLib._checkBundleProgress`).
+- **ICS-23** checks come from `Ics23Lib`, shared with Sei: leaf and inner-op spec checks, neighbour
+  checks for non-existence. Batch and compressed proofs are rejected.
+
+## 5. Proof format
+
+Trust anchor: `validatorSetHash(32) ‖ height(8, big-endian)`, 40 bytes. The anchor id equals the
+anchor.
+
+`proofBytes` is a protobuf `CometBftBundlePayload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| 1 `state_proof` | `StateProof` | Signed header, store key, ICS-23 multistore proof, repeated `StorageProofEntry{key, value, iavl_proof}` |
+| 2 `bundle_content` | `ClprBundleContent` | Message payloads |
+| 3 `validator_set` | `ValidatorSet{repeated bytes leaf}` | Raw CometBFT `SimpleValidator` bytes `{1 PublicKey{oneof}, 2 voting_power}` |
+| 4 `manifest_storage_proof` | `StorageProofEntry` | Optional: manifest commitment slot |
+| 5 `manifest_preimage` | bytes | Optional: manifest protobuf |
+| 6 `hops` (repeated) | `ValidatorSetHop{validator_set, signed_header}` | Optional catch-up across rotations |
+
+`SignedHeader` is `{1 header (flat last_block_id, as Sei), 2 commit {1 round, 2 part_set_total,
+3 part_set_hash, 4 signers_bits (MSB-first), repeated 5 {1 timestamp, 2 signature}}}`.
+`CometBftConfigPayload` is `{1 validator_set, 2 ledger_configuration, 3 state_proof, repeated 4
+hops}`. The ICS-23 proofs are the `ics23:iavl` and `ics23:simple` ops that `abci_query
+/store/<store>/key?prove=true` returns at height `H-1`; they verify against header `H`'s
+`app_hash`. `test/e2e/relay/cometbft.ts` builds every message from public RPC JSON.
+
+Deployment profile (`CometBftVerifier.Profile`, immutable):
+
+| Parameter | Meaning | Values used |
+|---|---|---|
+| `chainId` | CometBFT chain id the commits must carry | `cronosmainnet_25-1`, `mezo_31612-1`, `mantra-1`, `injective-1` |
+| `storeKey` | IAVL store holding EVM storage | `evm` |
+| `evmStateKeyPrefix` | Storage key prefix in that store | `0x02` (Ethermint, Evmos fork, cosmos/evm, Injective), `0x03` (Sei) |
+| `keyScheme` | Validator key type | `ED25519` (all chains above); `SECP256K1_ETH` (Heimdall, used by `PolygonPosVerifier`) |
+| `ed25519Verifier` | `IEd25519Verifier` address | required for `ED25519` |
+| `bootstrapValidatorsHash`, `bootstrapHeight` | Checkpoint for `verifyConfig` | a recent set hash and height, chosen at deployment |
+
+Key schemes:
 
 | Scheme | Leaf | Signature | Check | Gas per signature (live) |
 |---|---|---|---|---|
-| `ED25519` | oneof field 1, 32 B | 64 B over sign bytes | external `IEd25519Verifier` (pure Solidity; Hedera has no Ed25519 precompile) | **~638–640k** |
-| `SECP256K1_ETH` (Polygon fork) | oneof field 3, 65 B `0x04‖X‖Y` | 65 B `r‖s‖v` over `keccak256(signBytes)` | `ecrecover` == `keccak(X‖Y)[12:]`, low-s | **~32k** (mostly sign-bytes building) |
+| `ED25519` | oneof field 1, 32 B | 64 B over sign bytes | external `IEd25519Verifier` (pure Solidity) | ~638–640k |
+| `SECP256K1_ETH` (Polygon fork) | oneof field 3, 65 B `0x04‖X‖Y` | 65 B `r‖s‖v` over `keccak256(signBytes)` | `ecrecover` == `keccak(X‖Y)[12:]`, low-s | ~32k |
 
-### 3.4 Fewer signatures by voting-power ordering
+Why the anchor is compact: `SeiCometBftVerifier` stores the full validator list as its anchor
+(about 64 B per validator), so each bundle pays one cold SLOAD (2,100 gas) per 32 B and each
+rotation one SSTORE per 32 B. Here the anchor is two slots and the keys arrive in calldata, hashed
+exactly as CometBFT hashes them. 100 Ed25519 leaves are about 4 KB of calldata.
 
-CometBFT sorts a validator set by voting power, descending. The verifier walks validators in index
-order and **stops as soon as more than 2/3 is reached**. It never checks or counts signatures past
-that point. The relay (`encodeSignedHeader` in `test/e2e/relay/cometbft.ts`) sends the first
-committed signers in index order, which is the smallest subset that clears 2/3. Live effect:
+## 6. Validator-set rotation
 
-| Chain | Committed signatures | Sent and verified | Commit gas: minimal | If every committed signature were checked (est.) |
+`validators_hash` covers keys and voting power, so **any change in any validator's power is a
+rotation**. A rotation is one ordinary bundle at the last header the old set signs, header `R`
+with `next_validators_hash ≠ validators_hash`. The verifier returns the new anchor, which
+ClprService stores (3 slots for the anchor and 3 for its id).
+
+| Chain | Measured set changes (scan of `/blockchain` headers, 2026-10-01) | Rotation cost |
+|---|---|---|
+| MANTRA | 13 in 2,000 blocks (1.85 h): ~7/h, ~170/day | 7.76M per rotation bundle |
+| Injective | 4 in 2,000 blocks (20 min): ~12/h, ~290/day | 12.60M per rotation bundle |
+| Mezo | rare: all validators have power 1 | 12.84M per rotation bundle |
+
+Catch-up limits:
+- One hop costs about one commit: Cronos +4.8M, MANTRA 5.61M, Injective 10.11M. Cronos and MANTRA
+  fit a bundle plus one hop in 15M; Mezo (22.79M) and Injective (22.78M) do not.
+- When a bundle plus hops exceeds 15M, the relay sends **one bundle per rotation header
+  `R₁, R₂, …`**, each in its own transaction and each signed by the set of its time. This needs
+  ABCI proofs at `Rᵢ-1`, so the node must still hold those versions. Cosmos SDK's default pruning
+  keeps the last 362,880; the public Cronos node served about 500k blocks of history.
+- Because the client is sequential, the relay must step through every change whether or not
+  messages flow: about 170 transactions a day on MANTRA and 290 on Injective. CometBFT skipping
+  verification (accept a header whose new set is signed by more than 1/3 of the trusted set's power,
+  within a trusting period) would cover many delegation-only changes per transaction. It is not
+  implemented; it needs a second commit check and a trusting-period profile parameter.
+
+## 7. Gas and calldata
+
+All figures are anvil `eth_estimateGas` of the whole transaction (intrinsic, calldata and
+execution) on live mainnet data recorded 2026-10-01. Hedera uses the same gas schedule; its limits
+are **15,000,000 gas** and **131,072 B** of calldata. Sources: `npm run test:e2e:cometbft-live` and
+the fixtures in `test/e2e/fixtures/cometbft-live/`, replayed on this branch on 2026-10-01. MANTRA
+and Injective rows were measured on branch `feat/rwaprofiles-verifier` (same spec, fixtures
+`mantra.json` and `injective.json`), before the light-client refactor on this branch; expect
+differences of a few hundred gas when they are replayed here.
+
+Typical bundle (`verifyBundle`). No ClprService is deployed on these chains, so the "service" is a
+real contract with absent channel slots: five IAVL non-existence proofs. Existence proofs of a live
+channel are cheaper (one path instead of two neighbours).
+
+| Live `verifyBundle` | Signatures | Gas | Calldata | Fits 15M |
+|---|---|---|---|---|
+| Cronos | 7 | **7,835,260** | 15.9 KB | yes |
+| Cronos + one hop | 7 + 7 | 12,606,099 | 17.3 KB | yes |
+| Mezo | 15 | **12,844,413** | 16.3 KB | yes |
+| Mezo + one hop | 15 + 15 | 22,792,493 | 18.9 KB | **no** (§6) |
+| MANTRA, at a rotation header | 8 | **7,764,628** | 12.7 KB | yes |
+| MANTRA + one hop | 8 + 8 | 13,410,752 | 15.4 KB | yes |
+| Injective, at a rotation header | 15 | **12,598,455** | 15.0 KB | yes |
+| Injective + one hop | 15 + 15 | 22,784,596 | 18.6 KB | **no** (§6) |
+
+The fixed part of a bundle is about 3.4M gas, mostly the ICS-23 decoding of five two-neighbour
+non-existence proofs plus about 16 KB of calldata.
+
+Commit alone (`applyHops` through the test harness = light client = one rotation hop):
+
+| Live commit | Validators | Signatures | Gas | Calldata | Fits 15M |
+|---|---|---|---|---|---|
+| Heimdall v2 (secp256k1eth) | 104 | 10 | 1,540,363 | 9.3 KB | yes |
+| MANTRA | 38 | 8 | 5.61M | — | yes |
+| dYdX | 21 | 10 | 6,749,913 | 2.4 KB | yes |
+| Injective | 45 | 15 | 10.11M | — | yes |
+| Provenance | 100 | 18 | 12,615,173 | 6.6 KB | yes |
+| THORChain | 99 | 67 | 43,615,197 | 10.1 KB | **no** |
+
+Per signature (marginal, live): Ed25519 638,210 (dYdX) and 639,803 (Provenance), of which ≈604k is
+curve and SHA-512 and ≈37k sign bytes; secp256k1eth 32,182 (Heimdall). That allows about 21–22 Ed25519 signatures per 15M for a commit alone (0.4–1.1M fixed by set
+size), or about 18 inside a full bundle (~3.4M fixed).
+
+Effect of voting-power ordering (send only the smallest power-ordered subset):
+
+| Chain | Committed signatures | Sent and verified | Commit gas | If every committed signature were checked (estimate) |
 |---|---|---|---|---|
 | Provenance | 99 | 18 | 12.6M | ~64M |
 | Heimdall | 100 | 10 | 1.5M | ~4.4M |
 | dYdX | 17 | 10 | 6.75M | ~11M |
-| Cronos | 10 | 7 | — (bundle 7.84M) | bundle ~9.8M |
+| Cronos | 10 | 7 | bundle 7.84M | bundle ~9.8M |
+| MANTRA | 38 | 8 | 5.61M | ~25M |
+| Injective | 45 | 15 | 10.11M | ~29M |
 
-Ordering does nothing for **equal-power** sets: THORChain (67 of 99) and Mezo (15 of 21).
+Ordering does nothing for equal-power sets: THORChain (67 of 99) and Mezo (15 of 21).
 
-## 4. Wire formats (protobuf)
+## 8. Limits and known gaps
 
-```
-CometBftBundlePayload { 1 state_proof: StateProof; 2 bundle_content: ClprBundleContent;
-                        3 validator_set: ValidatorSet; 4 manifest_storage_proof: StorageProofEntry;
-                        5 manifest_preimage: bytes; repeated 6 hops: ValidatorSetHop }
-CometBftConfigPayload { 1 validator_set; 2 ledger_configuration; 3 state_proof; repeated 4 hops }
-ValidatorSetHop       { 1 validator_set: ValidatorSet; 2 signed_header: SignedHeader }
-ValidatorSet          { repeated bytes 1 leaf }          // CometBFT SimpleValidator bytes
-StateProof            { 1 signed_header; 2 store_key; 3 multistore_proof (ICS-23 CommitmentProof);
-                        repeated 4 StorageProofEntry{1 key, 2 value, 3 iavl_proof} }
-SignedHeader          { 1 header (relay layout, as Sei: flat last_block_id); 2 commit {1 round,
-                        2 part_set_total, 3 part_set_hash, 4 signers_bits (MSB-first),
-                        repeated 5 {1 timestamp, 2 signature}} }
-```
+- **Ed25519 cost.** About 640k gas per signature. A bundle fits one transaction while the smallest
+  power-ordered signer subset is about 18 or fewer. Larger commits need the accumulator:
 
-The ICS-23 proofs are the `ics23:iavl` and `ics23:simple` ops that `abci_query
-/store/<store>/key?prove=true` returns at height `H-1`; they verify against header `H`'s
-`app_hash`. `relay/cometbft.ts` builds every message from public RPC JSON.
+| Option | How | Cost on Hedera | Trust | Status |
+|---|---|---|---|---|
+| a. Voting-power ordering | Smallest power-ordered subset | — | unchanged | implemented |
+| b. Signature accumulator | `CometBftCommitAccumulator`: any subset per transaction, signed power recorded per header hash | THORChain live: 4 txs of 11.1–11.9M (46.6M) | unchanged | implemented, used by `CosmWasmVerifier` and `PolygonPosVerifier`; `CometBftVerifier` verifies inline only |
+| c. SNARK of the commit | Groth16 proof of "> 2/3 of set S signed h", verified with BN254 precompiles | ~0.3–0.4M gas per proof (estimate) | adds circuit and prover soundness, trusted setup | documented, not built |
+| d. Cheaper Ed25519 in Solidity | Optimise field arithmetic or SHA-512 | unmeasured | unchanged | not built |
+| e. Ed25519 precompile on Hedera | EIP-665 or RIP-7696 style | EIP-665 proposed 2,000 gas per signature | unchanged | not available |
 
-## 5. Trust assumptions and limits
+- **Frequent rotations** on MANTRA and Injective (§6): one transaction per set change.
+- **Injective is tight.** A rotation bundle needs 12.60M gas, 84% of Hedera's limit, and bundle plus
+  hop does not fit.
+- **ABCI proof history.** The relay needs a node that serves `abci_query` proofs at `H-1` for every
+  rotation header. Injective's official sentry serves about 100 blocks back (the fixture uses
+  Polkachu's RPC, which served 5,000+); MANTRA's public RPC kept about 300k blocks.
+- **Bundle size.** 12.7–19 KB, so the receiving ClprService needs `maxSyncBytes` at or above that
+  (BundleLib Step 2).
+- **No trusting period** in the contract (§4).
+- **Stable, Kava, 0G**: profiles, fixtures and source checks are not recorded yet.
+- **Sei** is served in production by `SeiCometBftVerifier`, which keeps its full-list anchor. It can
+  move to this contract with a `0x03` profile once its relay emits the compact anchor; there is no
+  live Sei fixture for `CometBftVerifier`.
+- **Arc** (Circle) runs Malachite: Ed25519 over SSZ votes and an EVM (MPT) state. Its live
+  certificate is checked off-chain only in `cometbft-live.spec.ts` (14 signatures from 22
+  validators at testnet height 64,879,061). It needs a separate adapter.
+- **Compliance suite.** `CometBftVerifier` has no compliance adapter of its own. The coverage test
+  is satisfied because the Sei adapter's contract name contains `CometBftVerifier`.
+- **Size.** 24,126 B leaves 450 B under EIP-170; new features need a split.
 
-- **Honest supermajority.** No set the verifier trusts ever had more than 2/3 of its power sign
-  two conflicting headers.
-- **Unbonding period.** This is a sequential light client with no trusting period. A set that has
-  fully unbonded could sign a forged hop at no cost. Relays must keep each channel's anchor within
-  the chain's unbonding period, so they have to submit a bundle at every rotation (§6.3). The
-  verifier does not compare header time to `block.timestamp`. Adding that check would need a
-  profile parameter.
-- **Bootstrap.** `verifyConfig` trusts the deploy-time checkpoint, so the deployer chooses it. A
-  checkpoint older than the unbonding period has the same exposure as above. Unlike
-  `SeiCometBftVerifier`, a config proof **cannot** supply its own validator set.
-- **Peer identity.** The service address is bound by channel context and proven storage, as in
-  the other EVM verifiers. Peer authenticity comes from ClprService's commitment/reveal.
-- **ICS-23 checks** come from `Ics23Lib`, shared with Sei: leaf and inner-op spec checks, plus
-  neighbour checks for non-existence. Batch and compressed proofs are rejected.
-- **No verifier state.** Replay protection is ClprService's message-id logic. Old headers are
-  rejected below the anchor height, and headers from a replaced set fail the set-hash check. An
-  older header at or above the anchor height still verifies; ClprService rejects its stale
-  metadata through its progress and replay checks (`BundleLib._checkBundleProgress`). A
-  rotation-only bundle counts as progress (Condition 2), so §6.3 works with ClprService unchanged.
-- **Bundle size throttle.** A bundle is ~16–19 KB, so the receiving ClprService needs
-  `maxSyncBytes` at or above that (BundleLib Step 2).
-- **Size.** 24,126 B, which is 450 B under EIP-170.
+## 9. Upgrades and forks
 
-## 6. Gas on Hedera terms
+CometBFT chains upgrade through `x/upgrade` plans voted in `x/gov`. The fork-aware verifier ADR
+(`ADR/2026-10-01-fork-aware-verifiers.md` in the spec fork, draft PR LFDT-CLPR/clpr-spec#1, Appendix
+B.1) classes them for this family:
 
-These are anvil `eth_estimateGas` figures for the whole transaction: intrinsic gas, calldata and
-execution. Hedera uses the same gas schedule. Its limits are **15,000,000 gas** and **131,072 B of
-calldata** (jumbo EthereumTransaction). Source: `npm run test:e2e:cometbft-live`, data from
-2026-10-01.
-
-### 6.1 Per signature and per commit
-
-| | Ed25519 | secp256k1eth |
+| ADR class | CometBFT example | Effect on `CometBftVerifier` today |
 |---|---|---|
-| One signature (marginal, live) | ~638–640k (≈604k curve + SHA-512, ≈37k sign bytes) | ~32k |
-| Signatures per 15M (commit only, 0.4–1.1M fixed by set size) | **~21–22** | ~400 |
-| Signatures per 15M (full bundle, ~3.4M fixed) | **~18** | — |
+| A. Parameter | `header.version` block or app version changes; validator sets | The header hash covers `version.block` and `version.app`, and the verifier hashes whatever the header carries. It does not pin a version, so a version bump alone neither breaks nor is detected. Validator sets move through rotation (§6) |
+| B. Layout | EVM module moves its store key or slot prefix (e.g. `0x02` → another prefix) | Every IAVL proof fails (`StorageKeyMismatch` or proof failure). Needs a new profile, which today means a new deployment |
+| C. Semantic | New signature scheme, a header-hash or vote-encoding change, a CometBFT major version that changes `Header.Hash` or `VoteSignBytes` | Commit check fails closed. Needs new verifier code and channel succession |
 
-| Live commit (`applyHops` = light client = rotation hop) | Validators | Sigs | Gas | Calldata | Fits 15M |
-|---|---|---|---|---|---|
-| Heimdall v2 | 104 | 10 | 1,540,382 | 9.3 KB | yes |
-| dYdX | 21 | 10 | 6,750,034 | 2.4 KB | yes |
-| Provenance | 100 | 18 | 12,615,327 | 6.6 KB | yes (light client only) |
-| THORChain | 99 | 67 | 43,615,384 | 10.1 KB | **no** |
+Injective already runs a CometBFT v1.0.1 fork. Upstream v1.0.1 `Header.Hash`, `CanonicalizeVote`,
+`VoteSignBytes` and `Validator.Bytes` are identical to v0.38 (diffed), and the live commit verifying
+on-chain confirms the fork kept them. `fork_id`, profile arming and `verifyForkProfile` from the ADR
+are not implemented in this family yet.
 
-### 6.2 Typical bundle
+## 10. Running it
 
-The "service" is a real contract with absent channel slots, so it has **five IAVL non-existence
-proofs**. A live channel's slots exist, and existence proofs are cheaper (one path instead of two
-neighbours).
+```bash
+forge test --match-path 'test/verifiers/evm/cometbft/*'                     # 35 tests, synthetic chain, real signatures
+forge test --match-path 'test/verifiers/compliance/SeiComplianceTest.t.sol'  # 28 tests, shared suite + Sei
+forge build && npm run test:e2e:cometbft-live      # live fixture replay on anvil (CLPR_ANVIL_PORT_A, default 8597)
+npm run cometbft-live:refresh [cronos mezo heimdall dydx provenance thorchain arc]   # re-record from public RPCs
+```
 
-| Live `verifyBundle` | Sigs | Gas | Calldata | Fits |
-|---|---|---|---|---|
-| Cronos | 7 | **7,835,474** | 15.9 KB | yes |
-| Cronos + one hop | 7 + 7 | 12,606,533 | 17.3 KB | yes |
-| Mezo | 15 | **12,844,528** | 16.3 KB | yes |
-| Mezo + one hop | 15 + 15 | 22,792,729 | 18.9 KB | **no** (use §6.3) |
+On `feat/rwaprofiles-verifier`, the same refresh script also takes `mantra injective`.
 
-The fixed part of a bundle is ~3.4M gas. Most of it is the ICS-23 decoding of five two-neighbour
-non-existence proofs plus ~16 KB of calldata.
+## 11. Files
 
-### 6.3 Validator-set rotation
+| File | What |
+|---|---|
+| `src/verifiers/evm/cometbft/CometBftVerifier.sol` | The EVM-store verifier and its `Profile` |
+| `src/verifiers/evm/cometbft/CometBftLightClient.sol` | Shared light client: set hashing, header binding, commit check, hops |
+| `src/verifiers/evm/cometbft/CometBftCommitAccumulator.sol` | Multi-transaction commit accumulation (used by the store-proof verifiers) |
+| `src/verifiers/evm/cometbft/CometBftStoreProofBase.sol` | Shared header references and ICS-23 store proofs for `CosmWasmVerifier` and `PolygonPosVerifier` |
+| `src/libraries/proof/cometbft/CometBftLib.sol`, `CometBftProofCodec.sol`, `Ics23Lib.sol` | Header hash, canonical vote, protobuf decoders, ICS-23 |
+| `src/verifiers/evm/sei/Ed25519Verifier.sol` | Pure-Solidity Ed25519 |
+| `test/verifiers/evm/cometbft/CometBftVerifier.t.sol`, `CometBftVerifierHarness.sol` | 35 Foundry tests; harness exposing `applyHops` |
+| `test/helpers/CometBftSyntheticChain.sol` | Synthetic chain with real signatures and IAVL trees |
+| `test/e2e/fixtures/cometbft-live/*.json` | Live captures: Cronos, Mezo, Heimdall, dYdX, Provenance, THORChain, Arc (MANTRA, Injective on `feat/rwaprofiles-verifier`) |
+| `test/e2e/relay/cometbft.ts` | Builds every protobuf message from public RPC JSON |
+| `test/e2e/relay/buildCometBftLiveFixture.ts` | Fixture refresh script |
+| `test/e2e/tests/verifiers/cometbft-live.spec.ts` | Live replay on anvil, with negatives |
+| `docs/chains/*.md` | One page per chain |
 
-A rotation is **one ordinary bundle at the last header the old set signs**, header `R` with
-`next_validators_hash ≠ validators_hash`. The verifier returns the new 40-byte anchor. ClprService
-then stores the 40-byte anchor and its id (3 slots each), about 20–130k gas. Rotation therefore costs the same
-as a normal bundle: 7.8M on Cronos and 12.8M on Mezo, both within 15M.
-
-Hops exist for a relay that missed `R`. One hop costs about one commit (Cronos +4.8M). If a bundle
-plus its hops exceeds 15M (Mezo), the relay instead submits **one bundle per rotation header
-`R₁, R₂, …`**, each in its own transaction and each signed by the set of its time. This is
-batching across transactions with no new contract. It needs ABCI proofs at `Rᵢ-1`, so the node
-must still have those versions. Cosmos SDK's default pruning keeps the last 362,880; the public
-Cronos node served about 500k blocks of history.
-
-### 6.4 When a commit does not fit (THORChain, and Ed25519 sets above ~18–22 signers)
-
-| Option | How | Cost on Hedera | Trust | Notes |
-|---|---|---|---|---|
-| **a. Voting-power ordering** (implemented) | Send only the smallest power-ordered subset (§3.4) | — | unchanged | Solves Provenance (99 → 18) and dYdX. Useless for equal power (THORChain 67, Mezo 15) |
-| **b. Signature accumulator across transactions** (implemented: `CometBftCommitAccumulator`, used by `CosmWasmVerifier`) | Anyone verifies any subset of a header's signatures per tx; the contract records signed power and a used-signer bitmap per header hash. A bundle references a header with >2/3 accumulated | THORChain live: 4 txs, 11.1–11.9M each, 46.6M total | unchanged | The verifier reads accumulator state (`view`). See [../provenance/README.md §3](../provenance/README.md) |
-| **c. SNARK of the commit** | Off-chain prover shows "signers of power > 2/3 of the set with hash S signed header hash h" (Ed25519 inside the circuit). On-chain, verify a Groth16 proof with BN254 precompiles (0x06–0x08, available on Hedera) | ~0.3–0.4M gas per proof, independent of set size | adds circuit/prover soundness. A trusted setup for Groth16 | Ed25519 is costly in-circuit (non-native field arithmetic), so proving cost and latency move off-chain. The best option for THORChain |
-| d. Cheaper Ed25519 in Solidity | Optimise field arithmetic or SHA-512 | unmeasured | unchanged | At most a constant factor; 67 signatures stay far above 15M |
-| e. Ed25519 precompile on Hedera | A HIP for EIP-665 or RIP-7696-style precompiles | EIP-665 proposed 2,000 gas per signature | unchanged | Would make every Ed25519 chain trivial. Not available today |
-
-## 7. Not covered yet (family members to add)
-
-- **Polygon PoS (Bor)**: done, see [../polygon/README.md](../polygon/README.md) (`PolygonPosVerifier`:
-  Heimdall commit → `milestone` store → Bor header → MPT; live full bundle 3.45M gas, rotation 3.45M).
-- **Arc (Malachite).** Votes are `SSZ(Vote{type: u8, height: u64, round: Option<u32>, value:
-  Option<B256>, address: [u8;20]})` signed with Ed25519 (`arc-node` `crates/types/src/vote.rs`).
-  The address is `keccak256(pubkey)[..20]`, the first 20 bytes. The value is the EVM block hash.
-  `arc_getCertificate` serves `{height, round, block_hash, signatures[{address, signature}]}`. The
-  validator set is `ValidatorRegistry.getActiveValidatorSet()` at the parent state. The live fixture
-  checks all signatures off-chain against the registry at `H-1`. An adapter needs a set-hash
-  anchor, SSZ sign bytes, then RLP header → MPT. Testnet needs 11 signatures ≈ 7M gas plus MPT, so
-  it fits.
-- **CosmWasm chains** (Provenance, THORChain): covered by `CosmWasmVerifier`
-  ([../provenance](../provenance/README.md), [../thorchain](../thorchain/README.md)), which fixes
-  the CosmWasm CLPR Service's queue-record layout and sketches the service. No CosmWasm CLPR
-  Service is deployed yet.
-- **dYdX.** No contract runtime, so a CLPR Service would have to be a native module. The light
-  client is ready.
-- **Sei** can move to this contract with a `0x03` profile once its relay emits the compact anchor.
-
-## 8. Sources checked
+## 12. References
 
 - CometBFT v0.38: `types/block.go` (`Header.Hash`), `types/canonical.go`, `types/vote.go`
   (`VoteSignBytes`), `types/validator.go` (`SimpleValidator`), `crypto/merkle` (RFC 6962 tree).
-- Polygon fork `github.com/0xPolygon/cometbft v0.3.8-polygon`, as pinned in heimdall-v2 `go.mod`:
-  `crypto/secp256k1/secp256k1.go` (`PubKeyName = "cometbft/PubKeySecp256k1eth"`, `Sign =
-  crypto.Sign(Keccak256(msg))`, 65 B key and signature) and `crypto/encoding/codec.go` (oneof
-  field 3).
-- heimdall-v2 `x/milestone/types/keys.go`, `proto/heimdallv2/milestone/milestone.proto`.
-- crypto-org-chain/ethermint and mezo-org/mezod `x/evm/types/key.go`: `StoreKey = "evm"` and
-  `KeyPrefixStorage = 0x02`. Mezo stores every written word as 32 B (`value.Bytes()`), deleting
-  only on empty input.
+- crypto-org-chain/ethermint and mezo-org/mezod `x/evm/types/key.go`: `StoreKey = "evm"`,
+  `KeyPrefixStorage = 0x02`. Mezo stores every written word as 32 B, deleting only on empty input.
+  Cronos's `0x02` layout was also confirmed by query: `0x02‖WCRO‖slot0` returns "Wrapped CRO".
+- MANTRA-Chain/mantrachain `main` (`cosmos/evm => MANTRA-Chain/evm v0.6.3-v8-mantra-1`) and
+  MANTRA-Chain/evm `x/vm/types/key.go`, `x/vm/keeper/statedb.go`, `x/vm/statedb/statedb.go`.
+  Confirmed live: the IAVL value of `0x02‖wMANTRA‖slot 0` equals `eth_getStorageAt` (0x01) at the
+  same height.
+- InjectiveFoundation/injective-core `v1.20.3-safeharbor.2` (last public source; the live node runs
+  v1.20.4): `injective-chain/modules/evm/types/key.go`, `keeper/statedb.go`; `go.mod` pins
+  `InjectiveLabs/cometbft v1.0.1-inj.9`. Upstream cometbft v1.0.1 diffed against v0.38.22.
+  Confirmed live: `0x02‖wINJ‖slot 5` equals `eth_getStorageAt` (0x64).
 - sei-chain `x/evm/types/keys.go`: `StateKeyPrefix = 0x03`.
-- CosmWasm wasmd `x/wasm/types/keys.go`: `ContractStorePrefix = 0x03`.
-- circlefin/arc-node `crates/types/src/{vote.rs,address.rs,ssz/v1}`, `crates/signer/src/local.rs`,
-  `contracts/src/validator-manager/ValidatorRegistry.sol`, `crates/eth-engine/src/constants.rs`.
-- Live: every RPC listed in `test/e2e/relay/buildCometBftLiveFixture.ts`. Cronos's `0x02` layout
-  was also confirmed by query: `0x02‖WCRO‖slot0` returns "Wrapped CRO" and `0x03` returns nothing.
-
-## 9. Running
-
-```bash
-forge test --match-path 'test/verifiers/evm/cometbft/*'   # 35 synthetic tests, real secp256k1 signatures
-forge build && npm run test:e2e:cometbft-live             # live fixtures on anvil (CLPR_ANVIL_PORT_A, default 8597)
-npm run cometbft-live:refresh [cronos mezo …]             # re-record from public RPCs
-```
+- Polygon fork `github.com/0xPolygon/cometbft v0.3.8-polygon`: `crypto/secp256k1/secp256k1.go`,
+  `crypto/encoding/codec.go` (secp256k1eth, oneof field 3).
+- circlefin/arc-node `crates/types/src/{vote.rs,address.rs,ssz/v1}`,
+  `contracts/src/validator-manager/ValidatorRegistry.sol` (Arc certificate check).
+- Fork-aware verifiers ADR, `ADR/2026-10-01-fork-aware-verifiers.md` (spec fork, draft PR
+  LFDT-CLPR/clpr-spec#1), Appendix B.1.
+- Live RPCs: every endpoint listed in `test/e2e/relay/buildCometBftLiveFixture.ts`.
