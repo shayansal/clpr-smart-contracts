@@ -38,6 +38,28 @@ contract BitcoinLibHarness {
     function reverse256(uint256 v) external pure returns (uint256) {
         return BitcoinLib.reverse256(v);
     }
+
+    function asertTarget(uint256 refTarget, int256 timeDiff, uint256 heightDiff, uint256 powLimit, uint256 halfLife)
+        external
+        pure
+        returns (uint256)
+    {
+        return BitcoinLib.asertTarget(refTarget, timeDiff, heightDiff, powLimit, halfLife);
+    }
+
+    function asertBits(
+        uint32 anchorBits,
+        uint32 anchorParentTime,
+        uint32 anchorHeight,
+        uint256 parentHeight,
+        uint32 parentTime,
+        uint256 powLimit,
+        uint256 halfLife
+    ) external pure returns (uint32) {
+        return BitcoinLib.asertBits(
+            anchorBits, anchorParentTime, anchorHeight, parentHeight, parentTime, powLimit, halfLife
+        );
+    }
 }
 
 /// @notice Deterministic regtest-style chain builder: real 80-byte headers with real (regtest)

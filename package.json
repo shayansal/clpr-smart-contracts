@@ -17,6 +17,8 @@
     "test:e2e:eth-live": "vitest run test/e2e/tests/verifiers/eth-live-sepolia.spec.ts",
     "eth-live:refresh": "tsx test/e2e/relay/buildEthLiveProof.ts --refresh --wait-nonsigners 600",
     "test:e2e:bitcoin-verifier": "CLPR_BACKEND=anvil vitest run test/e2e/tests/verifiers/bitcoin-verifier.spec.ts",
+    "test:e2e:bitcoin-cash-live": "vitest run test/e2e/tests/verifiers/bitcoin-cash-live.spec.ts",
+    "bitcoin-cash-live:refresh": "tsx test/e2e/relay/fetchBitcoinCashLive.ts",
     "test:e2e:sei-verifier": "CLPR_BACKEND=sei vitest run test/e2e/tests/verifiers/sei-verifier.spec.ts",
     "test:e2e:all": "npm run test:e2e:anvil && npm run test:e2e:besu",
     "test:e2e:avalanche": "CLPR_BACKEND=avalanche vitest run",
