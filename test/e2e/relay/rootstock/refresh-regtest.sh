@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Re-records test/e2e/fixtures/rootstock-live/regtest.json from a real RSKj regtest node.
-#   RSKJ_JAR=/path/rskj-core-<ver>-all.jar test/e2e/relay/rootstock/refresh-regtest.sh
+# Re-records a fixture in test/e2e/fixtures/rootstock-live/ from a real RSKj regtest node:
+#   regtest.json     (default)     a CLPR Channel record for the anvil spec and the forge tests
+#   compliance.json  (compliance)  one service, one state per endpoint manifest, for RootstockComplianceTest
+#   RSKJ_JAR=/path/rskj-core-<ver>-all.jar test/e2e/relay/rootstock/refresh-regtest.sh [regtest|compliance]
 # The fat jar ships in the rsksmart/rskj Docker image (/var/lib/rsk). Needs a JDK ≥ 17 (the dumper is a
 # single-file Java program). The node runs with V0 headers (RSKIP144/351/535 off), as on mainnet.
 set -euo pipefail
@@ -27,8 +29,9 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 cd "$ROOT"
-npx tsx test/e2e/relay/buildRootstockProof.ts --capture-regtest --rpc "http://127.0.0.1:$PORT"
+MODE="${1:-regtest}"
+npx tsx test/e2e/relay/buildRootstockProof.ts "--capture-$MODE" --rpc "http://127.0.0.1:$PORT"
 kill -TERM $NODE; wait $NODE || true   # graceful stop flushes the trie store
 java -cp "$RSKJ_JAR" "$HERE/UnitrieDump.java" "$WORK/db/unitrie" "$WORK/unitrie-dump.txt"
-npx tsx test/e2e/relay/buildRootstockProof.ts --proofs-regtest --dump "$WORK/unitrie-dump.txt"
+npx tsx test/e2e/relay/buildRootstockProof.ts "--proofs-$MODE" --dump "$WORK/unitrie-dump.txt"
 rm -rf "$WORK"

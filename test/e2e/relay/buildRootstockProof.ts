@@ -11,7 +11,8 @@ import {
     toRlp,
     createWalletClient,
     http,
-    defineChain
+    defineChain,
+    sha256
 } from "viem";
 import {privateKeyToAccount} from "viem/accounts";
 
@@ -31,7 +32,9 @@ import {privateKeyToAccount} from "viem/accounts";
 ///   npx tsx test/e2e/relay/buildRootstockProof.ts --refresh-mainnet [--rpc URL] [--count N]
 ///   npx tsx test/e2e/relay/buildRootstockProof.ts --capture-regtest --rpc http://127.0.0.1:4454
 ///   npx tsx test/e2e/relay/buildRootstockProof.ts --proofs-regtest --dump unitrie-dump.txt
-/// (`rootstock/refresh-regtest.sh` runs the regtest steps end to end.)
+///   npx tsx test/e2e/relay/buildRootstockProof.ts --capture-compliance --rpc http://127.0.0.1:4454
+///   npx tsx test/e2e/relay/buildRootstockProof.ts --proofs-compliance --dump unitrie-dump.txt
+/// (`rootstock/refresh-regtest.sh [regtest|compliance]` runs the regtest steps end to end.)
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const FIXTURE_DIR = path.resolve(__dirname, "../fixtures/rootstock-live");
@@ -226,8 +229,7 @@ export function channelSlots(channelId: Hex, nextMessageId: bigint) {
 }
 
 /// initcode: SSTORE each (slot, value), then return a 64-byte runtime (long Unitrie value → code hash).
-function storageInitcode(kv: {slot: Hex; value: Hex}[]): Hex {
-    const runtime = ("0x" + "fe".repeat(64)) as Hex;
+function storageInitcode(kv: {slot: Hex; value: Hex}[], runtime: Hex = ("0x" + "fe".repeat(64)) as Hex): Hex {
     let body = "";
     for (const {slot, value} of kv) body += "7f" + value.slice(2) + "7f" + slot.slice(2) + "55";
     // PUSH1 64 PUSH2 off PUSH1 0 CODECOPY PUSH1 64 PUSH1 0 RETURN
@@ -287,6 +289,144 @@ export async function captureRegtest(url: string, k = 3): Promise<RegtestCapture
         checkpoint: {hash: cp.hash, number: deployBlock - 1, difficulty: BigInt(cp.difficulty).toString(), timestamp: Number(BigInt(cp.timestamp))},
         headers,
         stateIndex: 0
+    };
+}
+
+// ── Compliance capture: one service, one state per manifest ─────────────────
+
+export const COMPLIANCE_FIXTURE = path.join(FIXTURE_DIR, "compliance.json");
+
+/// Runtime that SSTOREs every 64-byte (slot, value) pair of its calldata, padded to 64 bytes so the
+/// code is a long Unitrie value:
+///   PUSH1 0; L: JUMPDEST; CALLDATASIZE DUP2 LT ISZERO PUSH1 E JUMPI;
+///   DUP1 PUSH1 32 ADD CALLDATALOAD DUP2 CALLDATALOAD SSTORE PUSH1 64 ADD PUSH1 L JUMP; E: JUMPDEST STOP
+export const SETTER_RUNTIME = ("0x6000" + "5b" + "36" + "81" + "10" + "15" + "6018" + "57" + "80" + "6020" + "01" + "35" + "81" +
+    "35" + "55" + "6040" + "01" + "6002" + "56" + "5b" + "00").padEnd(2 + 128, "f") as Hex;
+
+const FOREIGN_SERVICE: Hex = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+// Protobuf, as ClprProtobuf.encodeEndpointManifest (proto3: zero / empty fields omitted).
+const pbVarint = (v: bigint): number[] => {
+    const out: number[] = [];
+    do {
+        let b = Number(v & 0x7fn);
+        v >>= 7n;
+        if (v) b |= 0x80;
+        out.push(b);
+    } while (v);
+    return out;
+};
+const pbKey = (f: number, w: number) => pbVarint(BigInt((f << 3) | w));
+const pbBytes = (f: number, b: number[]) => (b.length ? [...pbKey(f, 2), ...pbVarint(BigInt(b.length)), ...b] : []);
+const pbUint = (f: number, v: bigint) => (v ? [...pbKey(f, 0), ...pbVarint(v)] : []);
+
+/// The manifest ClprVerifierComplianceTest._buildManifest builds: endpoint i = 10.0.0.1:(50211+i), account [i+1].
+export function complianceManifest(version: number, service: Hex, endpoints: number): Hex {
+    const out = [...pbUint(1, BigInt(version)), ...pbBytes(2, [...bytes(service)])];
+    for (let i = 0; i < endpoints; i++) {
+        const svc = [...pbBytes(1, [...Buffer.from("10.0.0.1")]), ...pbUint(2, BigInt(50211 + i))];
+        const body = [...pbKey(1, 2), ...pbVarint(BigInt(svc.length)), ...svc, ...pbBytes(3, [i + 1])];
+        out.push(...pbKey(3, 2), ...pbVarint(BigInt(body.length)), ...body);
+    }
+    return hexOf(Uint8Array.from(out));
+}
+
+export interface ComplianceStage {
+    label: string;
+    block: number;
+    manifestPreimage: Hex;
+    proofs?: {code: Hex[]; slots: Hex[][]; manifest: Hex[]};
+}
+
+export interface ComplianceCapture {
+    rpc: string;
+    capturedAt: string;
+    clientVersion: string;
+    channelId: Hex;
+    service: Hex;
+    bundleContent: Hex; // two payloads; the channel's sentRunningHash is their sha256 chain from zero
+    slots: {slot: Hex; value: Hex}[]; // 5 channel slots + the last message slot (all stages)
+    checkpoint: {hash: Hex; number: number; difficulty: string; timestamp: number};
+    headers: MinedHeader[]; // checkpoint + 1 … last stage + k
+    stages: ComplianceStage[];
+}
+
+async function waitReceipt(url: string, hash: Hex, deadline: number) {
+    for (;;) {
+        if (Date.now() > deadline) throw new Error("transaction not mined in time");
+        const r = await rpc<{blockNumber: Hex; contractAddress: Hex; status: Hex} | null>(url, "eth_getTransactionReceipt", [hash]);
+        if (r) {
+            if (r.status !== "0x1") throw new Error("transaction failed");
+            return r;
+        }
+        await new Promise((res) => setTimeout(res, 1000));
+    }
+}
+
+/// A RSKj regtest node: deploy the setter, write the channel record and the first manifest commitment,
+/// then one new commitment per block. Every state the IClprVerifier compliance suite asks for exists in
+/// its own block, under the same service address.
+export async function captureCompliance(url: string, k = 3): Promise<ComplianceCapture> {
+    const deadline = Date.now() + 300_000;
+    const chain = defineChain({id: 33, name: "rsk-regtest", nativeCurrency: {name: "RBTC", symbol: "RBTC", decimals: 18},
+        rpcUrls: {default: {http: [url]}}});
+    const account = privateKeyToAccount(COW_KEY);
+    const wallet = createWalletClient({account, chain, transport: http(url)});
+    const send = (data: Hex, to?: Hex) =>
+        wallet.sendTransaction({to, data, gas: 1_000_000n, gasPrice: 0n, type: "legacy"} as never);
+
+    const deploy = await waitReceipt(url, await send(storageInitcode([], SETTER_RUNTIME)), deadline);
+    const service = deploy.contractAddress;
+    const deployBlock = Number(BigInt(deploy.blockNumber));
+
+    const channelId = keccak256(toHex("clpr/rootstock-live/compliance"));
+    const payloads: Hex[] = ["0x0a0401020304", "0x0a03050607"];
+    let running = pad("0x00", {size: 32});
+    for (const p of payloads) running = sha256(concat([running, sha256(p)]));
+    const bundleContent = concat(payloads.map((p) => concat(["0x12", toHex((p.length - 2) / 2, {size: 1}), p]))) as Hex;
+    const sl = channelSlots(channelId, 3n);
+    const w1 = (3n << 168n) | (1n << 160n) | 0xc1a9en; // nextMessageId 3 | ACTIVE | verifier
+    const slots = [
+        {slot: sl.channel[0], value: pad(toHex(w1), {size: 32})},
+        {slot: sl.channel[1], value: pad("0x00", {size: 32})},
+        {slot: sl.channel[2], value: running},
+        {slot: sl.channel[3], value: pad("0x00", {size: 32})},
+        {slot: sl.channel[4], value: pad("0x00", {size: 32})},
+        {slot: sl.lastMessage, value: running},
+    ];
+    const manifests: [string, Hex][] = [
+        ["v3-2-endpoints", complianceManifest(3, service, 2)],
+        ["v1-1-endpoint", complianceManifest(1, service, 1)],
+        ["v1-foreign-service", complianceManifest(1, FOREIGN_SERVICE, 1)],
+        ["v0-1-endpoint", complianceManifest(0, service, 1)],
+        ["v1-no-endpoints", complianceManifest(1, service, 0)],
+        ["v7-no-endpoints", complianceManifest(7, service, 0)],
+    ];
+    const kv = (xs: {slot: Hex; value: Hex}[]) => concat(xs.flatMap(({slot, value}) => [slot, value])) as Hex;
+    const stages: ComplianceStage[] = [];
+    for (const [i, [label, m]] of manifests.entries()) {
+        const writes = [{slot: sl.manifest, value: keccak256(m)}];
+        if (i === 0) writes.unshift(...slots.filter((s) => BigInt(s.value) !== 0n));
+        const r = await waitReceipt(url, await send(kv(writes), service), deadline);
+        stages.push({label, block: Number(BigInt(r.blockNumber)), manifestPreimage: m});
+    }
+    const last = stages[stages.length - 1].block;
+    while (Number(BigInt(await rpc<Hex>(url, "eth_blockNumber", []))) < last + k) {
+        if (Date.now() > deadline) throw new Error("regtest chain not advancing");
+        await new Promise((res) => setTimeout(res, 1000));
+    }
+    const cp = await rpc<RpcBlock>(url, "eth_getBlockByNumber", [toHex(deployBlock - 1), false]);
+    return {
+        rpc: url,
+        capturedAt: new Date().toISOString(),
+        clientVersion: await rpc<string>(url, "web3_clientVersion", []),
+        channelId,
+        service,
+        bundleContent,
+        slots,
+        checkpoint: {hash: cp.hash, number: deployBlock - 1, difficulty: BigInt(cp.difficulty).toString(), timestamp: Number(BigInt(cp.timestamp))},
+        headers: await fetchRange(url, deployBlock, last + k - deployBlock + 1),
+        stages,
     };
 }
 
@@ -419,6 +559,27 @@ export function buildRegtestProofs(cap: RegtestCapture, store: NodeStore): NonNu
     return {code: code.nodes, slots, manifest};
 }
 
+export function buildComplianceProofs(cap: ComplianceCapture, store: NodeStore) {
+    const sl = channelSlots(cap.channelId, 3n);
+    for (const st of cap.stages) {
+        const root = cap.headers[st.block - (cap.checkpoint.number + 1)].stateRoot;
+        const code = unitrieProof(store, root, codeKey(cap.service));
+        if (!code.valueHash || hexOf(code.valueHash) !== keccak256(SETTER_RUNTIME)) throw new Error("service code mismatch");
+        const slots = cap.slots.map(({slot, value}) => {
+            const p = unitrieProof(store, root, storageKey(cap.service, slot));
+            const got = p.value ? pad(hexOf(p.value), {size: 32}) : pad("0x00", {size: 32});
+            if (got !== value) throw new Error(`${st.label}: slot ${slot} has ${got}, expected ${value}`);
+            return p.nodes;
+        });
+        const m = unitrieProof(store, root, storageKey(cap.service, sl.manifest));
+        if (!m.value || pad(hexOf(m.value), {size: 32}) !== keccak256(st.manifestPreimage)) {
+            throw new Error(`${st.label}: manifest commitment mismatch`);
+        }
+        st.proofs = {code: code.nodes, slots, manifest: m.nodes};
+    }
+    return cap;
+}
+
 // ── Wire encoding ──────────────────────────────────────────────────────────
 
 const MINED_HEADER = {type: "tuple[]", components: [{name: "header", type: "bytes"}, {name: "coinbase", type: "bytes"}, {name: "merkleProof", type: "bytes"}]} as const;
@@ -490,6 +651,11 @@ async function main() {
         save(MAINNET_FIXTURE, cap);
     } else if (process.argv.includes("--capture-regtest")) {
         save(REGTEST_FIXTURE, await captureRegtest(arg("--rpc") ?? "http://127.0.0.1:4454"));
+    } else if (process.argv.includes("--capture-compliance")) {
+        save(COMPLIANCE_FIXTURE, await captureCompliance(arg("--rpc") ?? "http://127.0.0.1:4454"));
+    } else if (process.argv.includes("--proofs-compliance")) {
+        const cap = JSON.parse(readFileSync(COMPLIANCE_FIXTURE, "utf8")) as ComplianceCapture;
+        save(COMPLIANCE_FIXTURE, buildComplianceProofs(cap, loadDump(arg("--dump")!)));
     } else if (process.argv.includes("--proofs-regtest")) {
         const cap = JSON.parse(readFileSync(REGTEST_FIXTURE, "utf8")) as RegtestCapture;
         cap.proofs = buildRegtestProofs(cap, loadDump(arg("--dump")!));
