@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
-
 /// @title XrplLib
 /// @notice XRP Ledger binary formats and hashes, as rippled defines them (XRPLF/rippled @ ddbc5f1):
 ///         - STObject serialization (`STObject::add`): fields sorted by (type, field code); a field id
@@ -308,7 +307,8 @@ library XrplLib {
     ///         leaf hash itself (both leaf kinds hash their key), so a leaf at any depth is sound.
     function verifyPath(bytes32 root, bytes32 key, bytes[] memory inners, bytes32 leafHash, address hasher)
         internal
-        view {
+        view
+    {
         uint256 depth = inners.length;
         if (depth == 0 || depth > 64) revert SHAMapPathTooLong();
         bytes32 expect = root;
@@ -322,7 +322,8 @@ library XrplLib {
     function _innerStep(bytes memory node, bytes32 expect, bytes32 key, uint256 d, address hasher)
         private
         view
-        returns (bytes32) {
+        returns (bytes32)
+    {
         if (node.length != 512) revert SHAMapHashMismatch(d);
         if (half(hasher, abi.encodePacked(PREFIX_INNER, node)) != expect) revert SHAMapHashMismatch(d);
         return readB32(node, ((uint256(key) >> (252 - 4 * d)) & 15) * 32);
@@ -358,7 +359,8 @@ library XrplLib {
     function txLeafHash(bytes memory tx, bytes memory meta, bytes32 id, address hasher)
         internal
         view
-        returns (bytes32) {
+        returns (bytes32)
+    {
         return half(hasher, abi.encodePacked(PREFIX_TX_LEAF, encodeVL(tx.length), tx, encodeVL(meta.length), meta, id));
     }
 
@@ -444,15 +446,10 @@ library XrplLib {
         }
     }
 
-    function _txTopField(
-        TxWalk memory w,
-        Tx memory out,
-        bytes memory tx,
-        uint256 t,
-        uint256 f,
-        uint256 vs,
-        uint256 ve
-    ) private pure {
+    function _txTopField(TxWalk memory w, Tx memory out, bytes memory tx, uint256 t, uint256 f, uint256 vs, uint256 ve)
+        private
+        pure
+    {
         if (t == STI_UINT16 && f == 2) {
             out.txType = uint16(uint8(tx[vs])) << 8 | uint8(tx[vs + 1]);
             w.hasType = true;

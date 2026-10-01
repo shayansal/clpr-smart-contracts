@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {ClprSha512} from "@hiero-ledger/clpr/libraries/crypto/ClprSha512.sol";
 import {ClprBlake3} from "@hiero-ledger/clpr/libraries/crypto/ClprBlake3.sol";
 
 /// @dev SHA-512 and BLAKE3 against Node `crypto` (SHA-512) and @noble/hashes (BLAKE3) over inputs
@@ -10,6 +9,19 @@ import {ClprBlake3} from "@hiero-ledger/clpr/libraries/crypto/ClprBlake3.sol";
 ///      past 1024 exercise the chunk tree (2, 3, 4 and 5 chunks). The official BLAKE3 vector for the
 ///      empty input and the FIPS 180-4 "abc" vector are pinned separately.
 contract ClprHashesTest is Test {
+    address internal hasher;
+
+    function setUp() public {
+        // deployed from its artifact: importing it would pull this file onto its legacy profile
+        hasher = deployCode("ClprSha512Hasher.sol:ClprSha512Hasher");
+    }
+
+    function _sha512(bytes memory d) internal view returns (bytes memory out) {
+        bool ok;
+        (ok, out) = hasher.staticcall(d);
+        require(ok && out.length == 64, "hasher");
+    }
+
     function _input(uint256 n) internal pure returns (bytes memory d) {
         d = new bytes(n);
         for (uint256 i = 0; i < n; ++i) {
@@ -17,14 +29,13 @@ contract ClprHashesTest is Test {
         }
     }
 
-    function _v(uint256 n, bytes memory sha, bytes32 b3) internal pure {
+    function _v(uint256 n, bytes memory sha, bytes32 b3) internal view {
         bytes memory d = _input(n);
-        (bytes32 hi, bytes32 lo) = ClprSha512.hash(d);
-        require(keccak256(abi.encodePacked(hi, lo)) == keccak256(sha), string.concat("sha512 len ", vm.toString(n)));
+        require(keccak256(_sha512(d)) == keccak256(sha), string.concat("sha512 len ", vm.toString(n)));
         require(ClprBlake3.hash(d) == b3, string.concat("blake3 len ", vm.toString(n)));
     }
 
-    function test_vectors() public pure {
+    function test_vectors() public view {
         _v(
             0,
             hex"cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
@@ -142,22 +153,27 @@ contract ClprHashesTest is Test {
         );
     }
 
-    function test_knownAnswers() public pure {
-        (bytes32 hi, bytes32 lo) = ClprSha512.hash("abc");
-        assertEq(hi, 0xddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a);
-        assertEq(lo, 0x2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f);
+    function test_knownAnswers() public view {
+        assertEq(
+            _sha512("abc"),
+            hex"ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
         assertEq(ClprBlake3.hash(""), 0xaf1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262);
     }
 
-    function test_gas_sha512_oneBlock() public {
-        bytes memory d = _input(100);
+    function test_gas_sha512() public {
+        bytes memory d = _input(1000);
         uint256 g = gasleft();
-        ClprSha512.hash(d);
-        emit log_named_uint("sha512 1 block gas", g - gasleft());
-        d = _input(516); // XRPL inner node preimage: 4-byte prefix + 16 x 32
+        _sha512(d);
+        uint256 g1 = g - gasleft();
+        d = _input(2280);
         g = gasleft();
-        ClprSha512.hash(d);
-        emit log_named_uint("sha512 516 B (5 blocks) gas", g - gasleft());
+        _sha512(d);
+        emit log_named_uint("sha512 per 128-byte block (marginal)", (g - gasleft() - g1) / 10);
+        d = _input(516); // an XRPL inner node preimage: 4-byte prefix + 16 x 32
+        g = gasleft();
+        _sha512(d);
+        emit log_named_uint("sha512 XRPL inner node (5 blocks, with call)", g - gasleft());
     }
 
     function test_gas_blake3() public {
@@ -169,57 +185,5 @@ contract ClprHashesTest is Test {
         g = gasleft();
         ClprBlake3.hash(d);
         emit log_named_uint("blake3 1500 B gas", g - gasleft());
-    }
-}
-
-contract ClprHashesMarginalGasTest is Test {
-    function test_gas_marginal() public {
-        bytes memory a = new bytes(1000);
-        bytes memory b = new bytes(2280);
-        uint256 g = gasleft();
-        ClprSha512.hash(a);
-        uint256 g1 = g - gasleft();
-        g = gasleft();
-        ClprSha512.hash(b);
-        uint256 g2 = g - gasleft();
-        emit log_named_uint("sha512 per block (marginal, 10 blocks)", (g2 - g1) / 10);
-        a = new bytes(1024);
-        b = new bytes(2048);
-        g = gasleft();
-        ClprBlake3.hash(a);
-        g1 = g - gasleft();
-        g = gasleft();
-        ClprBlake3.hash(b);
-        g2 = g - gasleft();
-        emit log_named_uint("blake3 per compression (marginal, 17)", (g2 - g1) / 17);
-    }
-}
-
-contract ClprSha512HasherTest is Test {
-    function test_hasherMatchesLibrary() public {
-        // deployed from its artifact: importing it would force this file onto its legacy profile
-        address h = deployCode("ClprSha512Hasher.sol:ClprSha512Hasher");
-        uint256[9] memory lens = [uint256(0), 1, 111, 112, 127, 128, 129, 516, 3000];
-        for (uint256 k = 0; k < lens.length; ++k) {
-            bytes memory d = new bytes(lens[k]);
-            for (uint256 i = 0; i < d.length; ++i) {
-                d[i] = bytes1(uint8(i % 251));
-            }
-            (bool ok, bytes memory out) = h.staticcall(d);
-            assertTrue(ok);
-            (bytes32 hi, bytes32 lo) = ClprSha512.hash(d);
-            assertEq(out, abi.encodePacked(hi, lo));
-        }
-        bytes memory x = new bytes(2280);
-        uint256 g = gasleft();
-        (bool ok2,) = h.staticcall(x);
-        uint256 g2 = g - gasleft();
-        x = new bytes(1000);
-        g = gasleft();
-        h.staticcall(x);
-        uint256 g1 = g - gasleft();
-        assertTrue(ok2);
-        emit log_named_uint("hasher per block (marginal)", (g2 - g1) / 10);
-        emit log_named_uint("hasher 8-block call", g1);
     }
 }

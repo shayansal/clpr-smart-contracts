@@ -190,7 +190,8 @@ contract XrplLightClient {
             uint256 idx = RLP.readUint256(e[0]);
             if (idx >= n || (k > 0 && idx <= prev)) revert ValidatorIndexOrder(idx);
             prev = idx;
-            (bytes32 digest, bytes32 r, bytes32 s) = XrplLib.validationDigest(RLP.readBytes(e[1]), hd.hash, hd.seq, HASHER);
+            (bytes32 digest, bytes32 r, bytes32 s) =
+                XrplLib.validationDigest(RLP.readBytes(e[1]), hd.hash, hd.seq, HASHER);
             if (!XrplLib.signedBy(digest, r, s, unl.signers[idx])) revert BadValidationSignature(idx);
         }
     }

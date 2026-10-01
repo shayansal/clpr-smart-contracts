@@ -136,8 +136,14 @@ contract ClprSha512Hasher {
                         p,
                         and(
                             add(
-                                add(mload(sub(p, 0x200)), xor(and(xor(shr(1, y15), shr(8, y15)), 0xffffffffffffffff), shr(7, w15))),
-                                add(mload(sub(p, 0xe0)), xor(and(xor(shr(19, y2), shr(61, y2)), 0xffffffffffffffff), shr(6, w2)))
+                                add(
+                                    mload(sub(p, 0x200)),
+                                    xor(and(xor(shr(1, y15), shr(8, y15)), 0xffffffffffffffff), shr(7, w15))
+                                ),
+                                add(
+                                    mload(sub(p, 0xe0)),
+                                    xor(and(xor(shr(19, y2), shr(61, y2)), 0xffffffffffffffff), shr(6, w2))
+                                )
                             ),
                             0xffffffffffffffff
                         )
