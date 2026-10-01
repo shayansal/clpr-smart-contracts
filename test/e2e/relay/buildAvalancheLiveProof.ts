@@ -42,6 +42,28 @@ export const AVALANCHE_LIVE_DIR = path.resolve(__dirname, "../fixtures/avalanche
 export const AVALANCHE_LIVE_FIXTURE = path.join(AVALANCHE_LIVE_DIR, "capture.json");
 export const AVALANCHE_LIVE_VECTORS = path.join(AVALANCHE_LIVE_DIR, "vectors.json");
 
+/// One Warp network the live builder can capture from.
+export interface NetworkSpec {
+    network: string;
+    networkId: number;
+    evmChainId: number;
+    cChainCb58: string;
+    primaryNetwork: string;
+    cRpc: string;
+    proofRpcs: string[];
+    pApi: string;
+    /// ACP-118 signature aggregator endpoint.
+    aggregator: string;
+    /// "glacier": Ava Labs' hosted API (`{message, pChainHeight}`). "local": a self-run
+    /// ava-labs/icm-services signature-aggregator (`{message, "pchain-height"}`).
+    aggregatorApi: "glacier" | "local";
+    /// Long-lived contract whose account/storage proofs stand in for a ClprService.
+    account: Hex;
+    channelId: Hex;
+    maxSetAge: bigint;
+    fixtureDir: string;
+}
+
 export const FUJI = {
     network: "fuji",
     networkId: 5,
@@ -57,7 +79,8 @@ export const FUJI = {
     ],
     // The Ava Labs endpoint rejects numeric heights for platform.getValidatorsAt.
     pApi: "https://avalanche-fuji-p-chain-rpc.publicnode.com",
-    aggregator: "https://glacier-api.avax.network/v1/signatureAggregator/fuji/aggregateSignatures"
+    aggregator: "https://glacier-api.avax.network/v1/signatureAggregator/fuji/aggregateSignatures",
+    aggregatorApi: "glacier" as const
 };
 /// WAVAX on Fuji: a long-lived contract with code and a populated storage trie.
 export const DEFAULT_ACCOUNT: Hex = "0xd00ae08403B9bbb9124bB305C09058E32C39A48c";
@@ -71,6 +94,51 @@ export const ATTESTOR_KEYS: Hex[] = [
     "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9e0e17b1d7365"
 ];
 export const ATTESTOR_THRESHOLD = 2n;
+
+/// Flare networks (go-flare, avalanchego v1.14 fork). No public aggregator serves them, so the capture
+/// talks to our own ava-labs/icm-services signature-aggregator, which dials the validators over p2p
+/// (see src/verifiers/evm/avalanche/README.md, "Flare live test"). `FLARE_AGGREGATOR` overrides the URL.
+/// MinStakeDuration on both is 60 days (go-flare `inflation_settings.go`, Granite); the fixtures use a
+/// 7-day window because Coston2's P-Chain can go hours without a block.
+const FLARE_LIVE_DIR = path.resolve(__dirname, "../fixtures/flare-live");
+export const NETWORKS: Record<string, NetworkSpec> = {
+    fuji: {...FUJI, account: DEFAULT_ACCOUNT, channelId: LIVE_CHANNEL_ID, maxSetAge: LIVE_MAX_SET_AGE,
+        fixtureDir: AVALANCHE_LIVE_DIR},
+    coston2: {
+        network: "coston2",
+        networkId: 114,
+        evmChainId: 114,
+        cChainCb58: "vE8M98mEQH6wk56sStD1ML8HApTgSqfJZLk9gQ3Fsd4i6m3Bi",
+        primaryNetwork: "11111111111111111111111111111111LpoYY",
+        cRpc: "https://coston2-api.flare.network/ext/bc/C/rpc",
+        proofRpcs: ["https://coston2-api.flare.network/ext/bc/C/rpc"],
+        pApi: "https://coston2-api.flare.network/ext/bc/P",
+        aggregator: process.env.FLARE_AGGREGATOR ?? "http://127.0.0.1:18480/aggregate-signatures",
+        aggregatorApi: "local",
+        // WC2FLR (wrapped native token) on Coston2.
+        account: "0xC67DCE33D7A8efA5FfEB961899C73fe01bCe9273",
+        channelId: keccak256(toHex("clpr/avalanche-warp/coston2")),
+        maxSetAge: 7n * 24n * 3600n,
+        fixtureDir: path.join(FLARE_LIVE_DIR, "coston2")
+    },
+    flare: {
+        network: "flare",
+        networkId: 14,
+        evmChainId: 14,
+        cChainCb58: "umkbhSrjVw5nUvy1eo25AdrjRkPBdtzAMewuxA2rqEx4YMo4c",
+        primaryNetwork: "11111111111111111111111111111111LpoYY",
+        cRpc: "https://flare-api.flare.network/ext/bc/C/rpc",
+        proofRpcs: ["https://flare-api.flare.network/ext/bc/C/rpc"],
+        pApi: "https://flare-api.flare.network/ext/bc/P",
+        aggregator: process.env.FLARE_AGGREGATOR ?? "http://127.0.0.1:18483/aggregate-signatures",
+        aggregatorApi: "local",
+        // WFLR (wrapped native token) on Flare.
+        account: "0x1D80c49BbBCd1C0911346656B529DF9E5c2F783d",
+        channelId: keccak256(toHex("clpr/avalanche-warp/flare")),
+        maxSetAge: 7n * 24n * 3600n,
+        fixtureDir: path.join(FLARE_LIVE_DIR, "flare")
+    }
+};
 
 const ENTRY_LENGTH = 104;
 const VALIDATOR_SET_TYPEHASH = keccak256(toHex(
@@ -105,6 +173,8 @@ export interface LiveCapture {
     aggregate: {pChainHeight: number; unsignedMessage: Hex; signedMessage: Hex};
     account: {address: Hex; blockNumber: string; proof: GetProofJson};
     channelId: Hex;
+    /// Set-age window for the anchors (absent in older Fuji captures: 12 h).
+    maxSetAge?: string;
 }
 
 // ── Avalanche encodings ────────────────────────────────────────────────────
@@ -354,6 +424,7 @@ export interface AvalancheLiveProof {
         storageProof: (Buffer | Buffer[])[][];
         bundleContent: Buffer;
     };
+    maxSetAge: bigint;
     set: {totalWeight: bigint; height: bigint; timestamp: bigint; setHash: Hex};
     previousSet: {totalWeight: bigint; height: bigint; timestamp: bigint; setHash: Hex};
     attestors: Hex[];
@@ -405,8 +476,9 @@ export async function buildAvalancheLiveProof(c: LiveCapture): Promise<Avalanche
     const aHash = attestorsHash(ATTESTOR_THRESHOLD, att.addresses);
     const setHash = keccak256(set.packed);
     const prevHash = keccak256(prev.packed);
+    const maxSetAge = BigInt(c.maxSetAge ?? LIVE_MAX_SET_AGE);
     const base = {networkId: c.networkId, sourceChainId, channelId: c.channelId, codeHash,
-        maxSetAge: LIVE_MAX_SET_AGE, attestorsHash: aHash};
+        maxSetAge, attestorsHash: aHash};
     const trustAnchor = encodeTrustAnchor({...base, setHash, totalWeight: set.totalWeight,
         pChainHeight: BigInt(c.set.height), pChainTimestamp: BigInt(c.set.timestamp)});
     const previousTrustAnchor = encodeTrustAnchor({...base, setHash: prevHash, totalWeight: prev.totalWeight,
@@ -458,6 +530,7 @@ export async function buildAvalancheLiveProof(c: LiveCapture): Promise<Avalanche
         rotationProofBytes,
         parts: {header, warpSignature, validatorSet: set.packed, previousValidatorSet: prev.packed, rotation,
             accountProof, storageProof, bundleContent},
+        maxSetAge,
         set: {totalWeight: set.totalWeight, height: BigInt(c.set.height), timestamp: BigInt(c.set.timestamp), setHash},
         previousSet: {totalWeight: prev.totalWeight, height: BigInt(c.previousSet.height),
             timestamp: BigInt(c.previousSet.timestamp), setHash: prevHash},
@@ -495,12 +568,12 @@ async function jsonRpc<T>(url: string, method: string, params: unknown): Promise
     }
 }
 
-async function validatorsAt(height: number): Promise<ValidatorsAtJson> {
-    return jsonRpc(FUJI.pApi, "platform.getValidatorsAt", {height: String(height), subnetID: FUJI.primaryNetwork});
+async function validatorsAt(net: NetworkSpec, height: number): Promise<ValidatorsAtJson> {
+    return jsonRpc(net.pApi, "platform.getValidatorsAt", {height: String(height), subnetID: net.primaryNetwork});
 }
 
-async function pChainTime(height: number): Promise<number> {
-    const r = await jsonRpc<{block: {time?: number}}>(FUJI.pApi, "platform.getBlockByHeight",
+async function pChainTime(net: NetworkSpec, height: number): Promise<number> {
+    const r = await jsonRpc<{block: {time?: number}}>(net.pApi, "platform.getBlockByHeight",
         {height: String(height), encoding: "json"});
     if (r.block.time === undefined) throw new Error(`P-Chain block ${height} has no timestamp (pre-Banff?)`);
     return r.block.time;
@@ -512,28 +585,32 @@ function setKey(v: ValidatorsAtJson): string {
 }
 
 /// Most recent P-Chain height below `top` whose validator set differs from the set at `top`.
-async function previousDifferentSet(top: number, topKey: string): Promise<number> {
+async function previousDifferentSet(net: NetworkSpec, top: number, topKey: string): Promise<number> {
     let step = 16;
     let hi = top; // same set as top
     let lo = -1; // differs
     while (lo < 0) {
         const h = Math.max(0, top - step);
-        if (setKey(await validatorsAt(h)) !== topKey) lo = h;
+        if (setKey(await validatorsAt(net, h)) !== topKey) lo = h;
         else hi = h;
         if (h === 0 && lo < 0) throw new Error("no earlier set change found");
         step *= 2;
     }
     while (hi - lo > 1) {
         const mid = Math.floor((lo + hi) / 2);
-        if (setKey(await validatorsAt(mid)) !== topKey) lo = mid;
+        if (setKey(await validatorsAt(net, mid)) !== topKey) lo = mid;
         else hi = mid;
     }
     return lo;
 }
 
 export async function captureFujiLive(opts: {account?: Hex} = {}): Promise<LiveCapture> {
-    const account = opts.account ?? DEFAULT_ACCOUNT;
-    const sourceChainId = cb58ToId(FUJI.cChainCb58);
+    return captureLive(NETWORKS.fuji, opts);
+}
+
+export async function captureLive(net: NetworkSpec, opts: {account?: Hex} = {}): Promise<LiveCapture> {
+    const account = opts.account ?? net.account;
+    const sourceChainId = cb58ToId(net.cChainCb58);
 
     // The newest accepted block (Avalanche's "latest" is last-accepted, i.e. final). Public nodes keep
     // only a few recent states, so fetch the proof immediately and retry with a fresh block if the
@@ -542,15 +619,15 @@ export async function captureFujiLive(opts: {account?: Hex} = {}): Promise<LiveC
     let proof: GetProofJson | undefined;
     let proofRpc = "";
     let stateBlock = "";
-    const slots = deriveChannelSlots(LIVE_CHANNEL_ID);
+    const slots = deriveChannelSlots(net.channelId);
     for (let attempt = 0; attempt < 8 && !proof; attempt++) {
         if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
-        block = await jsonRpc<BlockJson>(FUJI.cRpc, "eth_getBlockByNumber", ["latest", false]);
+        block = await jsonRpc<BlockJson>(net.cRpc, "eth_getBlockByNumber", ["latest", false]);
         delete (block as Record<string, unknown>).transactions;
         // Under ACP-194 (SAE, live on Fuji) a header's stateRoot is the post-execution root of the last
         // SETTLED block (`settledHeight`), not of the block itself; pre-SAE it is the block's own root.
         stateBlock = block.settledHeight ?? block.number;
-        for (const url of FUJI.proofRpcs) {
+        for (const url of net.proofRpcs) {
             try {
                 const p = await jsonRpc<GetProofJson>(url, "eth_getProof", [account, slots, stateBlock]);
                 if (keccak256(p.accountProof[0] as Hex) !== block.stateRoot) {
@@ -567,24 +644,29 @@ export async function captureFujiLive(opts: {account?: Hex} = {}): Promise<LiveC
     if (!proof || !block) throw new Error("eth_getProof failed on every RPC");
 
     // Signing set: the newest P-Chain height whose timestamp is not after the block.
-    let height = Number((await jsonRpc<{height: string}>(FUJI.pApi, "platform.getHeight", {})).height);
-    let timestamp = await pChainTime(height);
-    while (timestamp > Number(BigInt(block.timestamp))) timestamp = await pChainTime(--height);
-    const validators = await validatorsAt(height);
+    let height = Number((await jsonRpc<{height: string}>(net.pApi, "platform.getHeight", {})).height);
+    let timestamp = await pChainTime(net, height);
+    while (timestamp > Number(BigInt(block.timestamp))) timestamp = await pChainTime(net, --height);
+    const validators = await validatorsAt(net, height);
 
-    const prevHeight = await previousDifferentSet(height, setKey(validators));
-    const previousSet = {height: prevHeight, timestamp: await pChainTime(prevHeight), validators: await validatorsAt(prevHeight)};
+    const prevHeight = await previousDifferentSet(net, height, setKey(validators));
+    const previousSet = {height: prevHeight, timestamp: await pChainTime(net, prevHeight),
+        validators: await validatorsAt(net, prevHeight)};
 
-    const msg = blockHashMessage(FUJI.networkId, sourceChainId, hexToBuf(block.hash));
+    const msg = blockHashMessage(net.networkId, sourceChainId, hexToBuf(block.hash));
     let signedMessage: Hex | undefined;
     for (let attempt = 0; attempt < 5 && !signedMessage; attempt++) {
-        const res = await fetch(FUJI.aggregator, {
+        const body = net.aggregatorApi === "glacier"
+            ? {message: msg.toString("hex"), pChainHeight: height}
+            : {message: msg.toString("hex"), "pchain-height": height};
+        const res = await fetch(net.aggregator, {
             method: "POST",
             headers: {"content-type": "application/json"},
-            body: JSON.stringify({message: msg.toString("hex"), pChainHeight: height})
+            body: JSON.stringify(body)
         });
-        const j = (await res.json()) as {signedMessage?: string; message?: unknown};
-        if (j.signedMessage) signedMessage = ("0x" + j.signedMessage.replace(/^0x/, "")) as Hex;
+        const j = (await res.json()) as {signedMessage?: string; "signed-message"?: string; message?: unknown};
+        const sm = j.signedMessage ?? j["signed-message"];
+        if (sm) signedMessage = ("0x" + sm.replace(/^0x/, "")) as Hex;
         else {
             console.warn(`[avalanche-live] aggregator: ${JSON.stringify(j).slice(0, 200)}`);
             await new Promise((r) => setTimeout(r, 3000));
@@ -593,18 +675,19 @@ export async function captureFujiLive(opts: {account?: Hex} = {}): Promise<LiveC
     if (!signedMessage) throw new Error("signature aggregation failed");
 
     return {
-        network: FUJI.network,
+        network: net.network,
         capturedAt: new Date().toISOString(),
-        sources: {cRpc: FUJI.cRpc, proofRpc, pApi: FUJI.pApi, aggregator: FUJI.aggregator},
-        networkId: FUJI.networkId,
-        evmChainId: FUJI.evmChainId,
-        sourceChainIdCb58: FUJI.cChainCb58,
+        sources: {cRpc: net.cRpc, proofRpc, pApi: net.pApi, aggregator: net.aggregator},
+        networkId: net.networkId,
+        evmChainId: net.evmChainId,
+        sourceChainIdCb58: net.cChainCb58,
         block,
         set: {height, timestamp, validators},
         previousSet,
         aggregate: {pChainHeight: height, unsignedMessage: hex(msg), signedMessage},
         account: {address: account, blockNumber: stateBlock, proof},
-        channelId: LIVE_CHANNEL_ID
+        channelId: net.channelId,
+        ...(net.maxSetAge === LIVE_MAX_SET_AGE ? {} : {maxSetAge: net.maxSetAge.toString()})
     };
 }
 
@@ -638,7 +721,7 @@ export function writeVectors(p: AvalancheLiveProof, c: LiveCapture, file = AVALA
         pChainTimestamp: p.set.timestamp.toString(),
         previousPChainHeight: p.previousSet.height.toString(),
         previousPChainTimestamp: p.previousSet.timestamp.toString(),
-        maxSetAge: LIVE_MAX_SET_AGE.toString(),
+        maxSetAge: p.maxSetAge.toString(),
         attestorThreshold: ATTESTOR_THRESHOLD.toString(),
         attestors: p.attestors,
         signers: hex(p.parts.warpSignature[0]),
@@ -661,19 +744,24 @@ function summarize(p: AvalancheLiveProof): string {
 
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
+    const ni = args.indexOf("--network");
+    const net = NETWORKS[ni >= 0 ? args[ni + 1] : "fuji"];
+    if (!net) throw new Error(`unknown --network; one of ${Object.keys(NETWORKS).join(", ")}`);
+    const fixture = path.join(net.fixtureDir, "capture.json");
+    const vectors = path.join(net.fixtureDir, "vectors.json");
     let capture: LiveCapture;
     if (args.includes("--refresh")) {
-        capture = await captureFujiLive();
-        mkdirSync(AVALANCHE_LIVE_DIR, {recursive: true});
-        writeFileSync(AVALANCHE_LIVE_FIXTURE, JSON.stringify(capture, null, 2) + "\n");
-        console.log(`[avalanche-live] wrote ${AVALANCHE_LIVE_FIXTURE}`);
+        capture = await captureLive(net);
+        mkdirSync(net.fixtureDir, {recursive: true});
+        writeFileSync(fixture, JSON.stringify(capture, null, 2) + "\n");
+        console.log(`[avalanche-live] wrote ${fixture}`);
     } else {
-        capture = loadLiveCapture();
+        capture = loadLiveCapture(fixture);
     }
     const proof = await buildAvalancheLiveProof(capture);
     if (args.includes("--refresh") || args.includes("--vectors")) {
-        writeVectors(proof, capture);
-        console.log(`[avalanche-live] wrote ${AVALANCHE_LIVE_VECTORS}`);
+        writeVectors(proof, capture, vectors);
+        console.log(`[avalanche-live] wrote ${vectors}`);
     }
     console.log(summarize(proof));
 }

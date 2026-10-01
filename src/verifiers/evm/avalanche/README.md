@@ -191,7 +191,8 @@ To verify:
 |---|---|---|
 | Avalanche C-Chain mainnet / Fuji | yes | Fuji tested live, mainnet measured live (set, signer count) |
 | Avalanche L1s on subnet-evm (ACP-77) | yes, same contract | subnet-evm signs block hashes with the same backend (`graft/subnet-evm/warp/verifier_backend.go`). Use the L1's `subnetID` set, `networkId` and blockchain id. 4-field accounts are accepted. |
-| Flare / Songbird / Coston2 | likely, not tested live | See below |
+| Flare mainnet / Coston2 | yes, same contract | **Tested live** with our own signature aggregator (see "Flare live test") |
+| Songbird / Coston | likely | Same go-flare code; not captured |
 
 **Flare has Warp.** The plan said it does not, but that is no longer true:
 - go-flare v1.14.x (`flare-foundation/go-flare`, Jul 2026) carries avalanchego's full Warp stack.
@@ -201,5 +202,54 @@ To verify:
   active.
 - All 180 Flare and 8 Coston2 validators have BLS keys.
 - Flare's one change is big.Int weights, which this verifier already handles.
-- No live Flare signature was produced, because no public signature aggregator serves Flare and
-  aggregating needs a node.
+
+## Flare live test
+
+No public signature aggregator serves Flare, so we ran Ava Labs' own one
+(`ava-labs/icm-services` `signature-aggregator`, commit `bd47aec`, avalanchego v1.15.0) on a laptop.
+It needs no Flare node and no keys:
+- It reads peer IPs from the public `info.peers` API (`{coston2,flare}-api.flare.network/ext/info`
+  lists all 8 / 180 validators with public IPs), dials them on port 9651 and completes the avalanchego
+  p2p handshake with an ephemeral TLS staking cert. go-flare v1.14.x accepts v1.15 peers: the
+  minimum compatible version is 1.14.0, the network id matches, and `upgradeTime` is only recorded,
+  not enforced (`network/peer/peer.go#handleHandshake`).
+- It then sends ACP-118 `SignatureRequest`s for `payload.Hash(blockHash)` and aggregates the replies.
+  Flare validators answer non-validator peers, just as on Avalanche.
+- **One incompatibility, Flare mainnet only:** avalanchego v1.15 decodes P-Chain weights as uint64
+  (`snow/validators/warp.go`), and Flare's total stake (2.23·10¹⁹ nFLR) overflows it. Individual
+  weights (≤ 3·10¹⁷) fit. `tools/flare-signature-aggregator/weight-proxy.mjs` sits in front of the
+  P-Chain API and divides every weight by 16 for the aggregator. This only decides when the aggregator
+  stops collecting. The capture re-checks the aggregate against the exact weights, and so does the
+  verifier. Coston2 (total 2.5·10¹⁷) needs no proxy.
+
+`tools/flare-signature-aggregator/run.sh coston2|flare` starts it. `npm run flare-live:refresh` then
+captures from each network (`buildAvalancheLiveProof.ts --network coston2|flare`):
+the latest C-Chain header (go-flare's coreth has no ACP-194 fields, so the state root is the block's
+own), the Primary Network set via `platform.getValidatorsAt`, the previous different set, the
+aggregate pinned to the signing P-Chain height, and `eth_getProof` for WC2FLR / WFLR.
+
+Results (2026-10-01, `test/e2e/fixtures/flare-live/`):
+
+| Network | Block | Set | Signers | Bundle (`eth_estimateGas`) | Calldata | Rotation | Calldata |
+|---|---|---|---|---|---|---|---|
+| Coston2 | 36,059,992 | 8 keys @P13603 | 5 (67.05%) | 1.54M | 15.8 KB | 1.60M | 16.0 KB |
+| Flare mainnet | 71,039,852 | 180 keys @P2105648 | 91 (67.08%) | 2.31M | 38.7 KB | 2.55M | 38.9 KB |
+
+Both use the unmodified `AvalancheWarpVerifier`, with `totalWeight` above uint64 on mainnet. Tests:
+`forge test --match-path 'test/verifiers/evm/avalanche/*Live*'` (Fuji, Coston2, Flare) and
+`npm run test:e2e:flare-live` (anvil, 28 cases: bundle, real rotation, replay, threshold, wrong set,
+replaced signer key, tampered signature, dropped signer, swapped state root, stale set, code hash,
+wrong network id).
+
+Flare-specific findings:
+- **The set changes at almost every P-Chain height,** because delegations change weights (@2105647 →
+  @2105648 differ only in weights). That does not force rotations: an anchor's set stays usable for
+  `maxSetAge` as long as its signers still hold 67% of the anchor's weights. The aggregator must be
+  pinned to the anchor's P-Chain height (`pchain-height`).
+- A weight-only "previous set" therefore still accepts the real signature. The test asserts that
+  this is accepted, and the negative case uses a set with one signer's key replaced instead.
+- MinStakeDuration is 60 days on both networks after Granite (go-flare
+  `txs/executor/inflation_settings.go`). The fixtures use `maxSetAge` = 7 days, because Coston2's
+  P-Chain can go hours without a block.
+- Public Flare RPCs serve `eth_getProof` only for recent state, so the capture fetches it right after
+  choosing the block.

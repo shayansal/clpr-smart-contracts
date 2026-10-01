@@ -14,14 +14,17 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 ///      WAVAX's account + channel-slot exclusion proofs. verifyConfig bootstraps from the live set;
 ///      verifyBundle and a real rotation then run unmodified.
 contract AvalancheWarpLiveTest is Test {
-    string internal constant VECTORS = "test/e2e/fixtures/avalanche-live/vectors.json";
-
     AvalancheWarpVerifier internal verifier;
     string internal j;
 
     function setUp() public {
         verifier = new AvalancheWarpVerifier();
-        j = vm.readFile(VECTORS);
+        j = vm.readFile(_vectorsPath());
+    }
+
+    /// Overridden by the Flare / Coston2 replays (FlareWarpLive.t.sol), which run every test below.
+    function _vectorsPath() internal pure virtual returns (string memory) {
+        return "test/e2e/fixtures/avalanche-live/vectors.json";
     }
 
     function _b(string memory key) internal view returns (bytes memory) {
@@ -32,11 +35,11 @@ contract AvalancheWarpLiveTest is Test {
         return vm.parseUint(vm.parseJsonString(j, key));
     }
 
-    function _ledger(bytes memory serviceAddress) internal pure returns (bytes memory) {
+    function _ledger(bytes memory serviceAddress) internal view returns (bytes memory) {
         return ClprProtobuf.encodeControlMessage(
             ClprTypes.LedgerConfiguration({
                 protocolVersion: 1,
-                chainId: "eip155:43113",
+                chainId: string.concat("eip155:", vm.toString(vm.parseJsonUint(j, ".evmChainId"))),
                 serviceAddress: serviceAddress,
                 nanosSinceEpoch: 1_790_000_000 * 1e9,
                 throttles: ClprTypes.Throttles({
@@ -106,7 +109,7 @@ contract AvalancheWarpLiveTest is Test {
         assertEq(m.nextMessageId, 0);
         assertEq(a.length, 0);
         (uint256 used,) = _gas(proof, _b(".trustAnchor"));
-        console.log("live Fuji verifyBundle execution gas", used);
+        console.log(string.concat("live ", vm.parseJsonString(j, ".network"), " verifyBundle execution gas"), used);
         console.log("  proofBytes", proof.length);
     }
 
@@ -117,7 +120,7 @@ contract AvalancheWarpLiveTest is Test {
         assertEq(a, _b(".trustAnchor"));
         assertEq(id, abi.encodePacked(uint64(_u(".pChainHeight"))));
         (uint256 used,) = _gas(proof, _b(".previousTrustAnchor"));
-        console.log("live Fuji rotation bundle execution gas", used);
+        console.log(string.concat("live ", vm.parseJsonString(j, ".network"), " rotation bundle execution gas"), used);
         console.log("  proofBytes", proof.length);
     }
 
@@ -147,8 +150,24 @@ contract AvalancheWarpLiveTest is Test {
         }
         anchor[180] = 0x00; // maxSetAge ≈ 2^56 s, no overflow when added to the timestamp
         bytes memory ctx = _b(".channelContext");
+        if (_sameKeys(cur, prev)) {
+            // Weight-only change (Flare's set changes with every delegation): the bit set still names
+            // the same keys, so the real signature stays valid under the previous weights as long as
+            // the signers held ≥67% there too. Accepting it is correct, and the check below proves it.
+            verifier.verifyBundle(swapped, anchor, ctx);
+            return;
+        }
         vm.expectRevert();
         verifier.verifyBundle(swapped, anchor, ctx);
+    }
+
+    /// Same keys in the same order (only weights differ). Entries are x48 ‖ y48 ‖ weight8.
+    function _sameKeys(bytes memory a, bytes memory b) internal pure returns (bool) {
+        if (a.length != b.length) return false;
+        for (uint256 i = 0; i < a.length; i++) {
+            if (i % 104 < 96 && a[i] != b[i]) return false;
+        }
+        return true;
     }
 
     function _find(bytes memory hay, bytes memory needle) internal pure returns (uint256) {
