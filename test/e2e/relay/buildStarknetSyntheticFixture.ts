@@ -1,5 +1,5 @@
 import {spawn, type ChildProcess} from "node:child_process";
-import {existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync} from "node:fs";
+import {mkdirSync, readFileSync, writeFileSync} from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {keccak256, toHex, type Hex} from "viem";
@@ -36,8 +36,8 @@ import {
 /// Fixture for the Foundry `StarknetVerifier` / `StarknetStateProver` tests.
 ///
 /// - `vectors`: Pedersen / Poseidon test vectors computed by the reference code in starknet.ts.
-/// - `live`: one REAL Starknet Sepolia `starknet_getStorageProof` (STRK token, total supply + absent keys)
-///   from test/e2e/fixtures/starknet-sepolia-live/pending — the prover must accept it as is.
+/// - `live`: one REAL Starknet Sepolia `starknet_getStorageProof` (STRK token, total supply + absent keys,
+///   fixtures/sepolia-storage-proof-15900215.json) — the prover must accept it as is.
 /// - `starknet`: a synthetic Starknet state holding a Cairo ClprService in CLPR layout v0, built with
 ///   the reference trie code. To make the gas realistic the paths are dense: the contract trie path has
 ///   a binary node at each of the top 24 levels (Sepolia's is ~23) and every queue key one at each of the
@@ -49,7 +49,9 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const STARKNET_SYNTHETIC_FIXTURE = path.resolve(__dirname, "../../verifiers/evm/starknet/fixtures/synthetic.json");
-const PENDING_DIR = path.resolve(__dirname, "../fixtures/starknet-sepolia-live/pending");
+/// A raw `starknet_getStorageProof` (+ header) from Starknet Sepolia block 15900215: STRK token, total
+/// supply and two absent keys.
+const LIVE_SAMPLE = path.resolve(__dirname, "../../verifiers/evm/starknet/fixtures/sepolia-storage-proof-15900215.json");
 
 const CHANNEL_ID: Hex = keccak256(toHex("clpr/starknet/synthetic"));
 const OTHER_CHANNEL_ID: Hex = keccak256(toHex("clpr/starknet/synthetic/other"));
@@ -167,10 +169,7 @@ async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T
 }
 
 function liveSample() {
-    if (!existsSync(PENDING_DIR)) return null;
-    const files = readdirSync(PENDING_DIR).filter((f) => f.endsWith(".json")).sort();
-    if (!files.length) return null;
-    const d = JSON.parse(readFileSync(path.join(PENDING_DIR, files[0]), "utf8"));
+    const d = JSON.parse(readFileSync(LIVE_SAMPLE, "utf8"));
     const r = d.proof;
     const ld = r.contracts_proof.contract_leaves_data[0];
     const parts: StarknetStorageProofParts = {
