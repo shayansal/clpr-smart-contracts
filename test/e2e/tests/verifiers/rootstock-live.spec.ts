@@ -93,6 +93,18 @@ describe("RootstockVerifier on live data (fixture replay)", () => {
                 "12 mainnet headers (k = 12)");
         });
 
+        it("extend records the k-final checkpoint of 40 real headers (catch-up, real transaction)", async () => {
+            const args = [checkpointOf(mainnet.checkpoint), minedHeaders(mainnet.headers)];
+            const hash = await wallet.writeContract({address: mainnetVerifier, abi: abi as never, functionName: "extend",
+                args: args as never, account: wallet.account!, chain: null, gas: 14_000_000n});
+            const r = await pub.waitForTransactionReceipt({hash});
+            expect(r.status).toBe("success");
+            const cd = (encodeFunctionData({abi, functionName: "extend", args} as never).length - 2) / 2;
+            console.log(`[rootstock-live] extend, 40 mainnet headers: gasUsed ${r.gasUsed}, calldata ${cd} B`);
+            expect(r.gasUsed).toBeLessThan(HEDERA_GAS);
+            expect(cd).toBeLessThan(HEDERA_CALLDATA);
+        });
+
         it("rejects a header whose bitcoin nonce was changed", async () => {
             const hs = minedHeaders(mainnet.headers.slice(0, 12));
             const h = hs[11].header;

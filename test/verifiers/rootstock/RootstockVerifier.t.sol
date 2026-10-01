@@ -100,6 +100,53 @@ contract RootstockVerifierTest is Test {
         console.log("12 mainnet headers (one k-window), gas:", g - gasleft());
     }
 
+    /// Catch-up across two transactions: header runs recorded by extend() chain back to the anchor.
+    function test_mainnet_extend_catchUpInTwoRuns() public {
+        (RootstockVerifier v, RootstockVerifier.Checkpoint memory cp) = _mainnet();
+        RootstockVerifier.MinedHeader[] memory first = _headers(mainnetJson, 0, 20);
+        RootstockVerifier.MinedHeader[] memory second = _headers(mainnetJson, 9, 31);
+        RootstockVerifier.Checkpoint memory x = v.extend(cp, first);
+        assertEq(x.number, cp.number + 9); // index 20 − k
+        assertEq(v.extendedFrom(v.checkpointId(x)), v.checkpointId(cp));
+        RootstockVerifier.Checkpoint memory y = v.extend(x, second);
+        assertEq(y.number, cp.number + 29);
+        v.requireDescends(cp, y);
+        v.requireDescends(cp, cp);
+        // y is not an ancestor of x, and an unrecorded checkpoint is not reachable
+        vm.expectRevert(RootstockVerifier.RskStartNotRecorded.selector);
+        v.requireDescends(y, x);
+        RootstockVerifier.Checkpoint memory forged = y;
+        forged.work += 1;
+        vm.expectRevert(RootstockVerifier.RskStartNotRecorded.selector);
+        v.requireDescends(cp, forged);
+    }
+
+    function test_mainnet_extend_gas40() public {
+        (RootstockVerifier v, RootstockVerifier.Checkpoint memory cp) = _mainnet();
+        RootstockVerifier.MinedHeader[] memory hs = _headers(mainnetJson, 0, 40);
+        uint256 g = gasleft();
+        v.extend(cp, hs);
+        console.log("extend, 40 mainnet headers, gas:", g - gasleft());
+    }
+
+    function test_mainnet_extend_rejects_wrongStart() public {
+        (RootstockVerifier v, RootstockVerifier.Checkpoint memory cp) = _mainnet();
+        RootstockVerifier.MinedHeader[] memory hs = _headers(mainnetJson, 1, MAINNET_K);
+        vm.expectRevert(RootstockVerifier.RskParentMismatch.selector);
+        v.extend(cp, hs);
+    }
+
+    /// A bundle may not start from a checkpoint that was never recorded from its anchor.
+    function test_regtest_rejects_unrecordedStart() public {
+        (RootstockVerifier v,, bytes memory ctx) = _regtest();
+        bytes memory anchor = _anchorAtCheckpoint(v);
+        RootstockVerifier.BundleProof memory p = _bundle();
+        p.start = _checkpoint(regtestJson);
+        p.start.work = 7;
+        vm.expectRevert(RootstockVerifier.RskStartNotRecorded.selector);
+        v.verifyBundle(abi.encode(p), anchor, ctx);
+    }
+
     function test_mainnet_rejects_belowConfirmations() public {
         (RootstockVerifier v, RootstockVerifier.Checkpoint memory cp) = _mainnet();
         vm.expectRevert(RootstockVerifier.RskNotFinal.selector);

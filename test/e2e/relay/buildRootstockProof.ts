@@ -437,12 +437,16 @@ export function encodeAnchor(cp: Checkpoint, codeHash: Hex): Hex {
     return encodeAbiParameters(ANCHOR_ABI, [{checkpoint: cp, codeHash} as never]);
 }
 
+export const ZERO_CHECKPOINT: Checkpoint = {blockHash: `0x${"00".repeat(32)}`, number: 0n, difficulty: 0n, timestamp: 0n, work: 0n};
+
+/// `start` = where the headers begin: ZERO_CHECKPOINT for the anchor, else a checkpoint recorded by `extend`.
 export function encodeBundleProof(p: {headers: MinedHeader[]; stateIndex: number; codeProof: Hex[]; slotProofs: Hex[][];
-    bundleContent: Hex; manifestPreimage: Hex; manifestProof: Hex[]}): Hex {
+    bundleContent: Hex; manifestPreimage: Hex; manifestProof: Hex[]; start?: Checkpoint}): Hex {
     return encodeAbiParameters([{type: "tuple", components: [
         {name: "headers", ...MINED_HEADER}, {name: "stateIndex", type: "uint256"}, {name: "codeProof", type: "bytes[]"},
         {name: "slotProofs", type: "bytes[][]"}, {name: "bundleContent", type: "bytes"}, {name: "manifestPreimage", type: "bytes"},
-        {name: "manifestProof", type: "bytes[]"}]}], [{...p, headers: minedHeaders(p.headers), stateIndex: BigInt(p.stateIndex)} as never]);
+        {name: "manifestProof", type: "bytes[]"}, {name: "start", ...CHECKPOINT_ABI}]}],
+    [{...p, headers: minedHeaders(p.headers), stateIndex: BigInt(p.stateIndex), start: p.start ?? ZERO_CHECKPOINT} as never]);
 }
 
 export function encodeConfigProof(p: {headers: MinedHeader[]; stateIndex: number; service: Hex; codeProof: Hex[]; peerConfigNanos: bigint}): Hex {

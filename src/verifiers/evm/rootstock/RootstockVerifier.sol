@@ -59,6 +59,8 @@ contract RootstockVerifier is ClprEvmBundleVerifier {
         bytes bundleContent; // ClprBundleContent protobuf
         bytes manifestPreimage; // optional endpoint-manifest update ...
         bytes[] manifestProof; // ... and the Unitrie proof of its commitment slot
+        Checkpoint start; // where `headers` begin: zero blockHash = the anchor, else a checkpoint
+        //                   recorded by {extend} that descends from the anchor
     }
 
     /// @notice `configProofBytes` of {verifyConfig}.
@@ -89,6 +91,9 @@ contract RootstockVerifier is ClprEvmBundleVerifier {
     error RskNotFinal();
     error RskServiceNotDeployed();
     error RskBadSlotProofCount();
+    error RskStartNotRecorded();
+
+    event CheckpointExtended(bytes32 indexed fromId, bytes32 indexed toId, uint256 number, bytes32 blockHash);
 
     // ── Immutable configuration ──────────────────────────────────────────────
 
@@ -100,6 +105,12 @@ contract RootstockVerifier is ClprEvmBundleVerifier {
     uint256 public immutable DURATION_LIMIT;
     uint256 public immutable FORK_DETECTION_FROM;
     uint256 public immutable MAX_BTC_TIMESTAMP_DIFF;
+
+    /// @notice How many {extend} records a bundle may walk back to reach its anchor.
+    uint256 public constant MAX_EXTENSIONS = 256;
+
+    /// @notice checkpointId(to) → checkpointId(from) for every header run proven by {extend}.
+    mapping(bytes32 => bytes32) public extendedFrom;
 
     bytes32 public immutable GENESIS_HASH;
     uint256 public immutable GENESIS_NUMBER;
@@ -144,7 +155,12 @@ contract RootstockVerifier is ClprEvmBundleVerifier {
         BundleProof memory p = abi.decode(proofBytes, (BundleProof));
         address service = _toAddress(ctx.remoteServiceAddress);
 
-        (Checkpoint memory finalCp, bytes32 stateRoot) = _followChain(anchor.checkpoint, p.headers, p.stateIndex);
+        Checkpoint memory from = anchor.checkpoint;
+        if (p.start.blockHash != bytes32(0)) {
+            requireDescends(anchor.checkpoint, p.start);
+            from = p.start;
+        }
+        (Checkpoint memory finalCp, bytes32 stateRoot) = _followChain(from, p.headers, p.stateIndex);
         _verifyCode(stateRoot, service, p.codeProof, anchor.codeHash);
 
         metadata = _verifyChannelSlots(stateRoot, service, ctx.channelId, p.slotProofs);
@@ -208,6 +224,40 @@ contract RootstockVerifier is ClprEvmBundleVerifier {
         throttles = c.throttles;
         initialTrustAnchor = abi.encode(Anchor({checkpoint: finalCp, codeHash: code.valueHash}));
         initialTrustAnchorId = abi.encodePacked(finalCp.blockHash);
+    }
+
+    // ── Catch-up: header runs proven ahead of a bundle ───────────────────────
+
+    /// @notice Prove `headers` on top of `from` (same checks as a bundle) and record the k-final
+    ///         checkpoint they reach. Permissionless: a record only says "this checkpoint follows from
+    ///         that one with valid merged-mining work"; a bundle uses it only when the chain of records
+    ///         leads back to its own anchor. Lets a channel catch up after more RSK blocks than one
+    ///         transaction can carry.
+    function extend(Checkpoint calldata from, MinedHeader[] calldata headers) external returns (Checkpoint memory to) {
+        (to,) = _followChain(from, headers, 0);
+        bytes32 toId = checkpointId(to);
+        if (extendedFrom[toId] == bytes32(0)) {
+            bytes32 fromId = checkpointId(from);
+            extendedFrom[toId] = fromId;
+            emit CheckpointExtended(fromId, toId, to.number, to.blockHash);
+        }
+    }
+
+    function checkpointId(Checkpoint memory c) public pure returns (bytes32) {
+        return keccak256(abi.encode(c));
+    }
+
+    /// @notice Reverts unless `start` is `anchor` or reachable from it through {extendedFrom} records.
+    function requireDescends(Checkpoint memory anchor, Checkpoint memory start) public view {
+        bytes32 target = checkpointId(anchor);
+        bytes32 cur = checkpointId(start);
+        if (cur == target) return;
+        for (uint256 i = 0; i < MAX_EXTENSIONS; ++i) {
+            cur = extendedFrom[cur];
+            if (cur == target) return;
+            if (cur == bytes32(0)) break;
+        }
+        revert RskStartNotRecorded();
     }
 
     // ── Header chain ─────────────────────────────────────────────────────────
