@@ -72,11 +72,11 @@ Bootstrap source: `Grandpa::CurrentSetId` and `Grandpa::Authorities` read with `
   justification at #9,183,744 with its read proof, and the set-change block #8,867,448 (5 → 6, `ScheduledChange`
   with delay 0) justified by set 5.
 - Refresh: `npm run grandpa-live:refresh -- bittensor` (override the RPC with `BITTENSOR_RPC`).
-- Replay: `forge build && npm run test:e2e:grandpa-live` (the "Bittensor (GRANDPA, ed25519)" block, 10 cases).
+- Replay: `forge build && npm run test:e2e:grandpa-live` (the "Bittensor (GRANDPA, ed25519)" block, 11 cases).
 - What is verified: on-chain `accountStorageKey` equals the chain's key derivation; a typical bundle with 14 of 20
   real ed25519 precommits and absent channel slots (zero metadata); the real 5 → 6 rotation returning the new
   anchor; three real non-zero EVM slots through the trie harness; rejection of a tampered signature, a commit below
-  threshold, the old set's anchor, a replayed set id, a stale block, and a proof with the root node missing.
+  threshold, a wrong authority list, the old set's anchor, a replayed set id, a stale block, and a proof with the root node missing.
 - The "service" is the live contract `0x6647dcbeb030dc8e227d8b1a2cb6a49f3c887e3c`, not a ClprService.
 
 ## Hiero → Bittensor direction

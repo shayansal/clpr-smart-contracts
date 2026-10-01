@@ -30,9 +30,11 @@ Per-chain pages: [Bittensor](../../../../docs/chains/bittensor.md) ·
 | Trust (one line) | > 2/3 of the GRANDPA set's weight is honest; weak-subjectivity bootstrap | > 2/3 of the Polkadot BEEFY set is honest; weak-subjectivity bootstrap |
 | Typical bundle (live) | 9.36M gas, 14.3 KB | 4.22M gas, 52.5 KB |
 | Bundle with set rotation (live) | 9.34M gas, 14.1 KB | 4.16M gas, 50.9 KB; 7.39M gas, 91.7 KB with a catch-up hop |
-| Contract size | `GrandpaVerifier`: 17,591 B | `BeefyParachainVerifier`: 19,361 B |
+| Contract size | `GrandpaVerifier`: 17,750 B | `BeefyParachainVerifier`: 19,361 B |
 | Extra deployment | `Ed25519Verifier`: 12,206 B | none |
 | Status | Live mainnet data (finney) replayed on anvil, recorded 2026-10-01 | Live Polkadot + Hydration mainnet data replayed on anvil, recorded 2026-10-01 |
+| Same verifier, another profile | Bifrost Network (`eip155:3068`, 19 authorities, threshold 13): 8.44M gas, 8.1 KB typical; 8.43M gas, 8.4 KB rotation; live mainnet, recorded 2026-10-01 ([page](../../../../docs/chains/bifrost-network.md)) | none |
+| Native-pallet variant | Chainflip (`polkadot:8b8c140b0af9db70686583e3f6bf2a59`, 139 authorities, threshold 95): [`GrandpaPalletVerifier`](./GrandpaPalletVerifier.sol) (17,272 B) reads a `pallet-clpr` record; [`GrandpaCommitAccumulator`](./GrandpaCommitAccumulator.sol) (6,126 B) checks the 92 signatures over 5 transactions (≤ 12.23M gas each), then the bundle costs 0.56M gas, 10.4 KB; live mainnet, recorded 2026-10-01; no CLPR pallet exists ([page](../../../../docs/chains/chainflip.md)) | none |
 
 The gas and calldata figures are `eth_estimateGas` of the full transaction on anvil (Prague rules, so EIP-7623
 calldata pricing applies). They come from the live fixtures recorded on 2026-10-01 (see
@@ -281,6 +283,8 @@ than 1/3 of the trusted Polkadot BEEFY set (Hydration), or the deployment's boot
 | `lastMessageSlot` | `bool` | Also prove the last sent message's running-hash slot |
 | `bundleContent` | `bytes` | Message payloads |
 | `manifestPreimage` | `bytes` | Endpoint manifest preimage, or empty |
+| `GrandpaPalletVerifier` `BundleProof` | `(Step[], bytes[], bytes, bytes)` | `steps`, `stateProof`, `bundleContent`, `manifestPreimage`; no `lastMessageSlot`. Empty `steps[].votes` means the commit was accumulated |
+| `GrandpaCommitAccumulator.accumulate` | `(GrandpaLib.Commit, bytes)` | One batch of votes (same 102-byte format) for `(round, setId, target hash, target number)`, plus the packed authority list |
 
 `BeefyParachainVerifier` trust anchor (92 bytes, big-endian):
 
@@ -323,6 +327,10 @@ Per-deployment profile (constructor):
 | `BeefyParachainVerifier` | `paraId` | Parachain id |
 | `BeefyParachainVerifier` | `paraHeadKey` | 44-byte relay key of `Paras::Heads(paraId)`; its last 4 bytes must be `paraId` LE |
 | `BeefyParachainVerifier` | `bootstrap` | Anchor struct: current set, next set, `minRelayBlock` |
+| `GrandpaPalletVerifier` | `ed25519Verifier`, `bootstrapSetId`, `bootstrapAuthoritiesHash`, `bootstrapMinHeight` | As for `GrandpaVerifier` (same 44-byte anchor and `Step` format, from `GrandpaLightClient`) |
+| `GrandpaPalletVerifier` | `accumulator` | `GrandpaCommitAccumulator` address; a step with empty `votes` needs its recorded weight. `address(0)` disables that |
+| `GrandpaPalletVerifier` | `palletPrefix`, `chainId` | `twox128` of the CLPR pallet name; CAIP-2 id. Record layout (`Queues`, `Service`) on the [Chainflip page](../../../../docs/chains/chainflip.md) |
+| `GrandpaCommitAccumulator` | `ed25519Verifier` | Address of the deployed `Ed25519Verifier` |
 
 The exact values used for each chain are on the per-chain pages.
 
@@ -361,6 +369,13 @@ fixtures recorded from mainnet on 2026-10-01; figures as recorded in the origina
 | Hydration typical (401 of 600 secp256k1) | relay #33,235,730 → para #15,244,831 | 4.22M | 52.5 KB | fits |
 | Hydration BEEFY rotation 5728 → 5729 | relay #33,235,434 | 4.16M | 50.9 KB | fits |
 | Hydration catch-up hop + newer commitment | relay #33,235,434 + #33,235,730 | 7.39M | 91.7 KB | fits |
+| Bifrost Network typical (13 of 19 ed25519) | #39,008,064, set 130,025 | 8,439,093 | 8,100 B | fits |
+| Bifrost Network rotation, set 130,024 → 130,025 | #39,007,800 | 8,430,845 | 8,388 B | fits |
+| Chainflip commit inline (92 ed25519, one tx) | #15,055,725, set 482 | 54,573,537 | 19,812 B | **does not fit** |
+| Chainflip accumulator batch (20 ed25519), largest of 5 | #15,055,725, set 482 | 12,232,209 | 7,972 B | fits (5 txs, 56,318,367 gas in total) |
+| Chainflip typical `verifyBundle` after accumulation | #15,055,725 | 559,394 | 10,404 B | fits |
+| Chainflip rotation: accumulator batch, largest of 5 (93 ed25519 of set 481) | #15,016,243 | 12,224,602 | 8,004 B | fits (56,917,055 gas in total) |
+| Chainflip rotation `verifyBundle`, set 481 → 482 | #15,016,243 | 701,762 | 17,764 B | fits |
 
 Hedera limits: 15,000,000 gas and 131,072 B (128 KB). The spec asserts both limits for every case above.
 
@@ -383,6 +398,9 @@ Not measured: gas on a real Hedera network (only anvil was used), and `verifyCon
 | BEEFY bundle with one catch-up hop | 7.39M / 91.7 KB | Two hops (≈ 131 KB) exceed 128 KB |
 | ForcedChange | reverts | Needs a new bootstrap (see [Upgrades and forks](#upgrades-and-forks)) |
 | ScheduledChange with delay > 0 | supported | Header chain from N to the justified block (tested with delay 2) |
+| Chainflip commit (92 signatures) | 54.6M inline: **does not fit** | `GrandpaCommitAccumulator`: 5 transactions of ≤ 20 signatures, then a 0.56M-gas bundle |
+| Bifrost Network set rotation | every 300 blocks (15 min), same keys | One 8.43M-gas rotation bundle per session; two steps in one tx do not fit |
+| Chainflip CLPR pallet | does not exist | Queue and service keys proven absent on live data; needs a runtime upgrade ([page](../../../../docs/chains/chainflip.md)) |
 
 Other gaps:
 
@@ -508,7 +526,7 @@ forge test --match-contract BeefyParachainComplianceTest
 forge test --match-path test/verifiers/evm/grandpa/GrandpaVerifier.t.sol -vv   # logs synthetic gas
 ```
 
-Live fixture replay on anvil (21 cases: typical bundles, rotations, the catch-up hop, real non-zero storage slots, and
+Live fixture replay on anvil (44 cases: typical bundles, rotations, the catch-up hop, real non-zero storage slots, and
 negative cases for tampered signature, below threshold, wrong or old set, set id replay, stale block, missing trie
 node, relay header mismatch, wrong para block):
 
@@ -541,6 +559,10 @@ npx tsx test/e2e/relay/buildSubstrateSyntheticFixture.ts
 | `src/verifiers/evm/grandpa/GrandpaVerifier.sol` | GRANDPA solo-chain verifier (Bittensor) |
 | `src/verifiers/evm/grandpa/BeefyParachainVerifier.sol` | BEEFY + relay-state parachain verifier (Hydration) |
 | `src/verifiers/evm/grandpa/SubstrateEvmVerifierBase.sol` | Shared Frontier `AccountStorages` state layer and config binding |
+| `src/verifiers/evm/grandpa/GrandpaLightClient.sol` | GRANDPA light client shared by `GrandpaVerifier` and `GrandpaPalletVerifier` (anchor, steps, rotation) |
+| `src/verifiers/evm/grandpa/GrandpaPalletVerifier.sol` | GRANDPA solo-chain verifier over native pallet storage (Chainflip) |
+| `src/verifiers/evm/grandpa/GrandpaCommitAccumulator.sol` | Multi-transaction GRANDPA signature accumulator for large sets |
+| `src/verifiers/evm/grandpa/SubstrateVerifierErrors.sol` | Errors shared by the finality and state layers |
 | `src/libraries/proof/substrate/Blake2b.sol` | BLAKE2b-256/128 on the BLAKE2F precompile (0x09) |
 | `src/libraries/proof/substrate/ScaleCodec.sol` | SCALE compact integers, little-endian reads, bounded slices |
 | `src/libraries/proof/substrate/SubstrateHeader.sol` | Header decode, block hash, GRANDPA digest signals |
@@ -549,6 +571,8 @@ npx tsx test/e2e/relay/buildSubstrateSyntheticFixture.ts
 | `src/libraries/proof/substrate/BeefyLib.sol` | BEEFY commitment, keyset root, signatures, MMR leaf and path |
 | `test/verifiers/evm/grandpa/GrandpaVerifier.t.sol` | `GrandpaVerifier` tests on a synthetic chain |
 | `test/verifiers/evm/grandpa/BeefyParachainVerifier.t.sol` | `BeefyParachainVerifier` tests on a synthetic chain |
+| `test/verifiers/evm/grandpa/GrandpaPalletVerifier.t.sol` | `GrandpaPalletVerifier` and `GrandpaCommitAccumulator` tests on a synthetic pallet chain and a weighted set |
+| `test/verifiers/compliance/GrandpaPalletComplianceTest.t.sol` | Compliance adapter for `GrandpaPalletVerifier` (ed25519 stub) |
 | `test/verifiers/evm/grandpa/SubstrateLibs.t.sol` | Library tests: BLAKE2b vectors, compact, trie node kinds, digests, BEEFY Merkle/MMR |
 | `test/verifiers/evm/grandpa/SubstrateTrieHarness.sol` | Exposes `SubstrateTrie.get` for the live spec |
 | `test/verifiers/evm/grandpa/fixtures/synthetic.json` | Synthetic GRANDPA, BEEFY and trie data |
@@ -558,6 +582,8 @@ npx tsx test/e2e/relay/buildSubstrateSyntheticFixture.ts
 | `test/verifiers/compliance/BeefyParachainComplianceTest.t.sol` | Compliance adapter for `BeefyParachainVerifier` |
 | `test/e2e/fixtures/grandpa-live/bittensor.json` | Live Bittensor justifications, authorities and read proofs |
 | `test/e2e/fixtures/grandpa-live/hydration.json` | Live Polkadot BEEFY, MMR, relay and Hydration proofs |
+| `test/e2e/fixtures/grandpa-live/bifrost.json` | Live Bifrost Network justifications, authorities and read proofs |
+| `test/e2e/fixtures/grandpa-live/chainflip.json` | Live Chainflip justifications, authorities and read proofs (absent `Clpr` keys, real items) |
 | `test/e2e/tests/verifiers/grandpa-live.spec.ts` | Anvil replay of the live fixtures with gas and calldata checks |
 | `test/e2e/relay/buildGrandpaLiveFixture.ts` | Live fixture recorder (`npm run grandpa-live:refresh`) |
 | `test/e2e/relay/buildSubstrateSyntheticFixture.ts` | Synthetic fixture generator |

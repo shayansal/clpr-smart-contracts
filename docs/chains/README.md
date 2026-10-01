@@ -7,7 +7,9 @@ upgrade notes are in the family README:
 
 | Chain | Status | Page |
 |---|---|---|
+| Bifrost Network | live-verified on Bifrost Network mainnet (2026-10-01) | [bifrost-network.md](./bifrost-network.md) |
 | Bittensor | live-verified on Bittensor mainnet (finney) (2026-10-01) | [bittensor.md](./bittensor.md) |
+| Chainflip | live-verified on Chainflip mainnet (2026-10-01): finality and storage proofs; no CLPR pallet exists, so no queue | [chainflip.md](./chainflip.md) |
 | Hydration | live-verified on Polkadot + Hydration mainnet (2026-10-01) | [hydration.md](./hydration.md) |
 
 Dates are fixture capture timestamps. "Live-verified" means live mainnet data replayed through the unmodified
