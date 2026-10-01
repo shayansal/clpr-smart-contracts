@@ -28,7 +28,7 @@ import {
     type LiveValidator,
     type RpcSignedHeader
 } from "../../relay/cometbft.js";
-import {channelSlots, FIXTURE_DIR, verifyArcCertificate} from "../../relay/buildCometBftLiveFixture.js";
+import {channelSlots, checkEvmStateProof, FIXTURE_DIR, verifyArcCertificate} from "../../relay/buildCometBftLiveFixture.js";
 
 /// CometBftVerifier (src/verifiers/evm/cometbft) against LIVE mainnet data, replayed offline from
 /// test/e2e/fixtures/cometbft-live/*.json (re-record: `npm run cometbft-live:refresh`).
@@ -45,6 +45,8 @@ import {channelSlots, FIXTURE_DIR, verifyArcCertificate} from "../../relay/build
 ///     (`applyHops` = validator set + header + >2/3 commit), which is also what a validator-set
 ///     rotation costs.
 ///   - Arc (Malachite): certificate signatures re-verified off-chain (different wire format).
+///   - Stable: no public CometBFT RPC, so no commit. The eth_getProof ICS-23 proofs are checked
+///     off-chain against block H+1's stateRoot (the app hash): store layout only, not finality.
 /// Gas and calldata are checked against Hedera's 15M gas / 128 KB calldata limits.
 ///
 /// Run: forge build && npm run test:e2e:cometbft-live
@@ -327,5 +329,24 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
         expect(r.verified).toBe(fx.raw.certificate.signatures.length);
         expect(fx.raw.certificate.block_hash).toBe(fx.raw.block.hash);
         report.arc = {validators: fx.raw.validators.length, signatures: r.verified, scheme: "ed25519 (SSZ vote)", note: "off-chain only"};
+    });
+    it("stable (state only): eth_getProof ICS-23 proofs bind 0x02‖USDT0‖slot to block H+1's app hash", () => {
+        const fx = load("stable");
+        expect(fx.raw.proof.storageProof.length).toBe(6);
+        expect(fx.raw.proof.storageProof.map((e: any) => BigInt(e.key))).toEqual([...channelSlots(fx.channelId), fx.existenceSlot].map((x: string) => BigInt(x)));
+        const r = fx.raw.proof.storageProof.map((e: any) => checkEvmStateProof(e, fx.evmStateKeyPrefix, fx.target, fx.storeKey, fx.raw.nextBlock.stateRoot));
+        expect(r.slice(0, 5).every((x: any) => !x.exists)).toBe(true); // absent channel slots: non-existence
+        expect(r[5].exists).toBe(true);
+        expect(r[5].value.length).toBe(32); // stored as a 32-byte word
+        expect(toHex(r[5].value)).toBe(fx.raw.storageAt); // == eth_getStorageAt at the same height
+        expect(BigInt(fx.raw.nextBlock.number)).toBe(BigInt(fx.meta.height) + 1n);
+        expect(fx.raw.nextBlock.parentHash).toBe(fx.raw.block.hash);
+        // Negative: a flipped byte in the IAVL proof, or another store prefix, no longer checks out.
+        const e = fx.raw.proof.storageProof[5];
+        const bad = Buffer.from(e.proof[0].slice(2), "hex");
+        bad[bad.length - 3] ^= 0x01;
+        expect(() => checkEvmStateProof({...e, proof: [toHex(bad), e.proof[1]]}, fx.evmStateKeyPrefix, fx.target, fx.storeKey, fx.raw.nextBlock.stateRoot)).toThrow();
+        expect(() => checkEvmStateProof(e, 0x03, fx.target, fx.storeKey, fx.raw.nextBlock.stateRoot)).toThrow();
+        report.stable = {scheme: "n/a (no CometBFT RPC)", note: "state proofs checked off-chain"};
     });
 });

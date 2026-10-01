@@ -17,6 +17,12 @@
  *                                changes at H (next != validators) it is a real rotation.
  *   malachite    (Arc)          arc_getCertificate at H + ValidatorRegistry.getActiveValidatorSet at
  *                                H-1, verified off-chain only (different wire format, see README).
+ *   evm-state    (Stable)       no public CometBFT RPC, so no commit. eth_getProof (cosmos/evm returns
+ *                                the ICS-23 IAVL + multistore proofs) for the same six slots at H, and
+ *                                blocks H and H+1 from eth_getBlockByNumber. Checked off-chain: every
+ *                                proof's key is prefix ‖ target ‖ slot, the IAVL root is the "evm"
+ *                                store root, and the multistore root equals block H+1's stateRoot
+ *                                (cosmos/evm reports the CometBFT app_hash there).
  */
 
 import {mkdirSync, writeFileSync} from "node:fs";
@@ -30,6 +36,7 @@ import {
     fetchCommit,
     fetchStatus,
     fetchValidators,
+    ics23Root,
     validatorSetHash
 } from "./cometbft.js";
 
@@ -40,7 +47,7 @@ const CHANNEL_OFFSETS = [1n, 2n, 4n, 5n, 16n];
 
 export interface ChainSpec {
     name: string;
-    kind: "evm-bundle" | "commit" | "malachite";
+    kind: "evm-bundle" | "commit" | "malachite" | "evm-state";
     rpc: string;
     storeKey?: string;
     evmStateKeyPrefix?: number;
@@ -94,6 +101,15 @@ export const CHAINS: Record<string, ChainSpec> = {
         target: "0xc86c7c0efbd6a49b35e8714c5f59d99de09a225b", // WKAVA ("Wrapped Kava")
         existenceSlot: "0x00", // name() short string "Wrapped Kava", equal to eth_getStorageAt
         rotationSearch: 2000
+    },
+    // Stable: StableBFT (CometBFT-based) + Cosmos EVM; stabled source is not public (binaries only).
+    // No public CometBFT RPC (docs list only the EVM endpoint), so only state is recorded, through
+    // eth_getProof. The live proofs show store "evm", key 0x02‖addr‖slot, 32-byte words.
+    stable: {
+        name: "stable", kind: "evm-state", rpc: "https://rpc.stable.xyz",
+        storeKey: "evm", evmStateKeyPrefix: 0x02,
+        target: "0x779ded0c9e1022225f8e0630b35a9b54be713736", // USDT0 (proxy), stablelabs/stable-tokenlist
+        existenceSlot: "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc" // EIP-1967 implementation
     },
     heimdall: {name: "heimdall", kind: "commit", rpc: "https://polygon-heimdall-rpc.publicnode.com"},
     dydx: {name: "dydx", kind: "commit", rpc: "https://dydx-rpc.publicnode.com"},
@@ -150,6 +166,50 @@ async function captureEvmBundle(c: ChainSpec) {
             rotation: commit.sh.header.next_validators_hash !== commit.sh.header.validators_hash
         },
         raw: {commit: commit.json, hopCommit: hopCommit.json, validators: vals.json, hopValidators: hopVals.json, abci}
+    };
+}
+
+async function evmRpc(url: string, method: string, params: unknown[]): Promise<any> {
+    const res = await fetch(url, {
+        method: "POST", headers: {"content-type": "application/json"},
+        body: JSON.stringify({jsonrpc: "2.0", id: 1, method, params}), signal: AbortSignal.timeout(30_000)
+    });
+    const j = (await res.json()) as any;
+    if (j.error) throw new Error(`${method}: ${JSON.stringify(j.error)}`);
+    return j.result;
+}
+
+/** Check one eth_getProof storage entry against the store layout and block H+1's stateRoot. */
+export function checkEvmStateProof(entry: {key: string; proof: string[]}, prefix: number, target: Hex, storeKey: string, appHash: string) {
+    const want = evmStorageKey(prefix, target, entry.key as Hex);
+    if (entry.proof.length !== 2) throw new Error("expected IAVL + multistore proofs");
+    const iavl = ics23Root(Buffer.from(entry.proof[0].slice(2), "hex"));
+    const ms = ics23Root(Buffer.from(entry.proof[1].slice(2), "hex"));
+    const provenKey = iavl.absentKey ?? iavl.key;
+    if (!provenKey.equals(want)) throw new Error(`key ${provenKey.toString("hex")} != ${want.toString("hex")}`);
+    if (ms.key.toString() !== storeKey || !ms.value.equals(iavl.root)) throw new Error("IAVL root is not the store root");
+    if ("0x" + ms.root.toString("hex") !== appHash.toLowerCase()) throw new Error("multistore root != app hash");
+    return {exists: iavl.absentKey === undefined, value: iavl.absentKey ? Buffer.alloc(0) : iavl.value, iavlRoot: iavl.root, appHash: ms.root};
+}
+
+async function captureEvmState(c: ChainSpec) {
+    const H = BigInt(await evmRpc(c.rpc, "eth_blockNumber", [])) - 5n;
+    const at = "0x" + H.toString(16);
+    const slots = [...channelSlots(LIVE_CHANNEL_ID), c.existenceSlot!];
+    const [proof, storageAt, block, next, chainId] = await Promise.all([
+        evmRpc(c.rpc, "eth_getProof", [c.target, slots, at]),
+        evmRpc(c.rpc, "eth_getStorageAt", [c.target, c.existenceSlot, at]),
+        evmRpc(c.rpc, "eth_getBlockByNumber", [at, false]),
+        evmRpc(c.rpc, "eth_getBlockByNumber", ["0x" + (H + 1n).toString(16), false]),
+        evmRpc(c.rpc, "eth_chainId", [])
+    ]);
+    const checked = proof.storageProof.map((e: any) => checkEvmStateProof(e, c.evmStateKeyPrefix!, c.target!, c.storeKey!, next.stateRoot));
+    if (checked.slice(0, 5).some((x: any) => x.exists)) throw new Error("a channel slot exists");
+    if (!checked[5].exists || "0x" + checked[5].value.toString("hex") !== storageAt) throw new Error("existence value != eth_getStorageAt");
+    const pick = (b: any) => ({number: b.number, hash: b.hash, parentHash: b.parentHash, stateRoot: b.stateRoot, timestamp: b.timestamp});
+    return {
+        meta: {height: H.toString(), evmChainId: Number(chainId), appHash: next.stateRoot},
+        raw: {proof, storageAt, block: pick(block), nextBlock: pick(next)}
     };
 }
 
@@ -239,7 +299,11 @@ async function captureArc(c: ChainSpec) {
 export async function capture(name: string) {
     const c = CHAINS[name];
     if (!c) throw new Error(`unknown chain ${name}`);
-    const body = c.kind === "evm-bundle" ? await captureEvmBundle(c) : c.kind === "commit" ? await captureCommit(c) : await captureArc(c);
+    const body =
+        c.kind === "evm-bundle" ? await captureEvmBundle(c)
+        : c.kind === "commit" ? await captureCommit(c)
+        : c.kind === "evm-state" ? await captureEvmState(c)
+        : await captureArc(c);
     return {
         chain: name, kind: c.kind, rpc: c.rpc, capturedAt: new Date().toISOString(),
         storeKey: c.storeKey, evmStateKeyPrefix: c.evmStateKeyPrefix, target: c.target, existenceSlot: c.existenceSlot,

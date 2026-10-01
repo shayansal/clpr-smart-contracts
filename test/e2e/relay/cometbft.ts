@@ -328,6 +328,58 @@ export function encodeStateProof(signedHeader: Buffer, storeKey: string, entries
     ]);
 }
 
+/**
+ * Off-chain ICS-23 root of one CommitmentProof (existence, or the neighbour of a non-existence
+ * proof), for the IAVL and Tendermint specs: leaf = sha256(prefix ‖ varint(len k) ‖ k ‖
+ * varint(32) ‖ sha256(v)), inner = sha256(prefix ‖ child ‖ suffix). Used where no CometBFT RPC is
+ * public (Stable) to tie `eth_getProof` output to a block's app hash; the on-chain path is Ics23Lib.
+ */
+export function ics23Root(commitmentProof: Buffer): {key: Buffer; value: Buffer; root: Buffer; absentKey?: Buffer} {
+    const varint = (b: Buffer, i: number): [bigint, number] => {
+        let x = 0n;
+        for (let s = 0n; ; s += 7n) {
+            const c = b[i++];
+            x |= BigInt(c & 0x7f) << s;
+            if (!(c & 0x80)) return [x, i];
+        }
+    };
+    const fields = (b: Buffer): [number, Buffer][] => {
+        const out: [number, Buffer][] = [];
+        for (let i = 0; i < b.length; ) {
+            let t: bigint, l: bigint;
+            [t, i] = varint(b, i);
+            if ((t & 7n) === 0n) {
+                [, i] = varint(b, i);
+                continue;
+            }
+            if ((t & 7n) !== 2n) throw new Error("unexpected wire type");
+            [l, i] = varint(b, i);
+            out.push([Number(t >> 3n), b.subarray(i, i + Number(l))]);
+            i += Number(l);
+        }
+        return out;
+    };
+    const get = (fs: [number, Buffer][], f: number) => fs.filter((x) => x[0] === f).map((x) => x[1]);
+    const exist = (ex: Buffer) => {
+        const fs = fields(ex);
+        const [key, value] = [get(fs, 1)[0], get(fs, 2)[0] ?? Buffer.alloc(0)];
+        const prefix = get(fields(get(fs, 3)[0]), 5)[0] ?? Buffer.alloc(0);
+        const hv = Buffer.from(sha256(value));
+        let h = Buffer.from(sha256(Buffer.concat([prefix, pbVarint(BigInt(key.length)), key, pbVarint(BigInt(hv.length)), hv])));
+        for (const op of get(fs, 4)) {
+            const f = fields(op);
+            h = Buffer.from(sha256(Buffer.concat([get(f, 2)[0] ?? Buffer.alloc(0), h, get(f, 3)[0] ?? Buffer.alloc(0)])));
+        }
+        return {key, value, root: h};
+    };
+    const top = fields(commitmentProof);
+    const ex = get(top, 1)[0];
+    if (ex) return exist(ex);
+    const ne = fields(get(top, 2)[0]);
+    const neighbour = get(ne, 2)[0] ?? get(ne, 3)[0];
+    return {...exist(neighbour), absentKey: get(ne, 1)[0]};
+}
+
 export function evmStorageKey(prefix: number, address: Hex, slot: Hex): Buffer {
     return Buffer.concat([Buffer.from([prefix]), hexBuf(address.toLowerCase()), hexBuf(slot.replace(/^0x/, "").padStart(64, "0"))]);
 }
