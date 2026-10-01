@@ -6,6 +6,7 @@ import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {Blake2b} from "@hiero-ledger/clpr/libraries/proof/substrate/Blake2b.sol";
 import {SubstrateTrie} from "@hiero-ledger/clpr/libraries/proof/substrate/SubstrateTrie.sol";
+import {SubstrateVerifierErrors} from "@hiero-ledger/clpr/verifiers/evm/grandpa/SubstrateVerifierErrors.sol";
 
 /// @title SubstrateEvmVerifierBase
 /// @notice The state half shared by the Substrate verifiers: once a finalized `state_root` is
@@ -22,7 +23,7 @@ import {SubstrateTrie} from "@hiero-ledger/clpr/libraries/proof/substrate/Substr
 ///
 /// The slot layout (channel slots, manifest commitment, `_config`) is inherited from
 /// {ClprEvmBundleVerifier}: the CLPR Service is the same Solidity contract on every EVM.
-abstract contract SubstrateEvmVerifierBase is ClprEvmBundleVerifier {
+abstract contract SubstrateEvmVerifierBase is ClprEvmBundleVerifier, SubstrateVerifierErrors {
     /// @dev twox128("AccountStorages").
     bytes16 internal constant ACCOUNT_STORAGES_PREFIX = 0xab1160471b1418779239ba8e2b847e42;
     /// @dev ClprService `_config.serviceAddress` (struct base 23 + member 2; storage-layout.json).
@@ -40,7 +41,6 @@ abstract contract SubstrateEvmVerifierBase is ClprEvmBundleVerifier {
     error ChainIdMismatch();
     error ServiceAddressSlotMismatch();
     error ConfigNanosMismatch();
-    error HeightTooOld();
 
     constructor(bytes16 evmPalletPrefix, string memory chainId) {
         if (evmPalletPrefix == bytes16(0) || bytes(chainId).length == 0) revert InvalidEvmProfile();

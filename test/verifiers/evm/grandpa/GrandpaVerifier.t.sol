@@ -8,8 +8,10 @@ import {GrandpaLib} from "@hiero-ledger/clpr/libraries/proof/substrate/GrandpaLi
 import {SubstrateHeader} from "@hiero-ledger/clpr/libraries/proof/substrate/SubstrateHeader.sol";
 import {SubstrateTrie} from "@hiero-ledger/clpr/libraries/proof/substrate/SubstrateTrie.sol";
 import {Ed25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/Ed25519Verifier.sol";
+import {GrandpaLightClient} from "@hiero-ledger/clpr/verifiers/evm/grandpa/GrandpaLightClient.sol";
 import {GrandpaVerifier} from "@hiero-ledger/clpr/verifiers/evm/grandpa/GrandpaVerifier.sol";
 import {SubstrateEvmVerifierBase} from "@hiero-ledger/clpr/verifiers/evm/grandpa/SubstrateEvmVerifierBase.sol";
+import {SubstrateVerifierErrors} from "@hiero-ledger/clpr/verifiers/evm/grandpa/SubstrateVerifierErrors.sol";
 
 /// @notice GrandpaVerifier on the synthetic GRANDPA chain of fixtures/synthetic.json: real ed25519
 ///         justifications from 4-authority sets (threshold 3), set changes with delay 0 and 2, a
@@ -58,7 +60,7 @@ contract GrandpaVerifierTest is Test {
     function _step(string memory blk, string memory votesKey, bytes memory authorities)
         internal
         view
-        returns (GrandpaVerifier.Step memory s)
+        returns (GrandpaLightClient.Step memory s)
     {
         s.headers = new bytes[](1);
         s.headers[0] = _b(string.concat(".grandpa.", blk, ".header"));
@@ -68,12 +70,12 @@ contract GrandpaVerifierTest is Test {
         s.authorities = authorities;
     }
 
-    function _one(GrandpaVerifier.Step memory s) internal pure returns (GrandpaVerifier.Step[] memory steps) {
-        steps = new GrandpaVerifier.Step[](1);
+    function _one(GrandpaLightClient.Step memory s) internal pure returns (GrandpaLightClient.Step[] memory steps) {
+        steps = new GrandpaLightClient.Step[](1);
         steps[0] = s;
     }
 
-    function _bundle(GrandpaVerifier.Step[] memory steps) internal view returns (bytes memory) {
+    function _bundle(GrandpaLightClient.Step[] memory steps) internal view returns (bytes memory) {
         return abi.encode(GrandpaVerifier.BundleProof(steps, nodes, false, "", ""));
     }
 
@@ -129,7 +131,7 @@ contract GrandpaVerifierTest is Test {
     }
 
     function test_descendantPrecommitWithAncestry() public view {
-        GrandpaVerifier.Step memory s = _step("b100", "votes", auth0);
+        GrandpaLightClient.Step memory s = _step("b100", "votes", auth0);
         s.votes = _b(".grandpa.b101.ancestryVotes");
         s.ancestry = new bytes[](1);
         s.ancestry[0] = _b(".grandpa.b101.header");
@@ -145,7 +147,7 @@ contract GrandpaVerifierTest is Test {
     }
 
     function test_rotationThenFinalStepInOneBundle() public view {
-        GrandpaVerifier.Step[] memory steps = new GrandpaVerifier.Step[](2);
+        GrandpaLightClient.Step[] memory steps = new GrandpaLightClient.Step[](2);
         steps[0] = _step("b120", "votes", auth0);
         steps[1] = _step("b130", "votes", auth1);
         (ClprTypes.QueueMetadata memory m, bytes memory na,) = _verify(_bundle(steps), _anchor(0, auth0, 100));
@@ -154,7 +156,7 @@ contract GrandpaVerifierTest is Test {
     }
 
     function test_rotationWithDelayUsesHeaderChain() public view {
-        GrandpaVerifier.Step memory s = _step("b142", "votes", auth1);
+        GrandpaLightClient.Step memory s = _step("b142", "votes", auth1);
         s.headers = new bytes[](3);
         s.headers[0] = _b(".grandpa.b142.header");
         s.headers[1] = _b(".grandpa.b141.header");
@@ -233,7 +235,7 @@ contract GrandpaVerifierTest is Test {
     // ── negative: signatures / threshold / validator set ─────────────────────
 
     function test_rejects_badSignature() public {
-        GrandpaVerifier.Step memory s = _step("b100", "votes", auth0);
+        GrandpaLightClient.Step memory s = _step("b100", "votes", auth0);
         s.votes[102 + 40] ^= 0x01; // second vote's signature
         bytes memory p = _bundle(_one(s));
         bytes memory a = _anchor(0, auth0, 100);
@@ -242,7 +244,7 @@ contract GrandpaVerifierTest is Test {
     }
 
     function test_rejects_belowThreshold() public {
-        GrandpaVerifier.Step memory s = _step("b100", "votes", auth0);
+        GrandpaLightClient.Step memory s = _step("b100", "votes", auth0);
         bytes memory two = new bytes(204);
         for (uint256 i; i < 204; ++i) {
             two[i] = s.votes[i];
@@ -255,7 +257,7 @@ contract GrandpaVerifierTest is Test {
     }
 
     function test_rejects_duplicateVote() public {
-        GrandpaVerifier.Step memory s = _step("b100", "votes", auth0);
+        GrandpaLightClient.Step memory s = _step("b100", "votes", auth0);
         bytes memory dup = abi.encodePacked(s.votes, _slice(s.votes, 204, 102)); // idx 2 twice
         s.votes = dup;
         bytes memory p = _bundle(_one(s));
@@ -265,7 +267,7 @@ contract GrandpaVerifierTest is Test {
     }
 
     function test_rejects_authorityIndexOutOfRange() public {
-        GrandpaVerifier.Step memory s = _step("b100", "votes", auth0);
+        GrandpaLightClient.Step memory s = _step("b100", "votes", auth0);
         s.votes[204 + 1] = 0x09;
         bytes memory p = _bundle(_one(s));
         bytes memory a = _anchor(0, auth0, 100);
@@ -276,7 +278,7 @@ contract GrandpaVerifierTest is Test {
     function test_rejects_wrongValidatorSet() public {
         bytes memory p = _bundle(_one(_step("b100", "votes", auth1)));
         bytes memory a = _anchor(0, auth0, 100);
-        vm.expectRevert(GrandpaVerifier.AuthoritySetMismatch.selector);
+        vm.expectRevert(GrandpaLightClient.AuthoritySetMismatch.selector);
         v.verifyBundle(p, a, ctx);
     }
 
@@ -292,19 +294,19 @@ contract GrandpaVerifierTest is Test {
         // After 0 → 1 the anchor is set 1; a set-0 justification no longer matches.
         bytes memory p = _bundle(_one(_step("b100", "votes", auth0)));
         bytes memory a = _anchor(1, auth1, 121);
-        vm.expectRevert(GrandpaVerifier.AuthoritySetMismatch.selector);
+        vm.expectRevert(GrandpaLightClient.AuthoritySetMismatch.selector);
         v.verifyBundle(p, a, ctx);
     }
 
     function test_rejects_staleBlock() public {
         bytes memory p = _bundle(_one(_step("b100", "votes", auth0)));
         bytes memory a = _anchor(0, auth0, 101);
-        vm.expectRevert(SubstrateEvmVerifierBase.HeightTooOld.selector);
+        vm.expectRevert(SubstrateVerifierErrors.HeightTooOld.selector);
         v.verifyBundle(p, a, ctx);
     }
 
     function test_rejects_descendantVoteWithoutAncestry() public {
-        GrandpaVerifier.Step memory s = _step("b100", "votes", auth0);
+        GrandpaLightClient.Step memory s = _step("b100", "votes", auth0);
         s.votes = _b(".grandpa.b101.ancestryVotes");
         bytes memory p = _bundle(_one(s));
         bytes memory a = _anchor(0, auth0, 100);
@@ -322,18 +324,18 @@ contract GrandpaVerifierTest is Test {
     }
 
     function test_rejects_brokenHeaderChain() public {
-        GrandpaVerifier.Step memory s = _step("b142", "votes", auth1);
+        GrandpaLightClient.Step memory s = _step("b142", "votes", auth1);
         s.headers = new bytes[](2);
         s.headers[0] = _b(".grandpa.b142.header");
         s.headers[1] = _b(".grandpa.b140.header");
         bytes memory p = _bundle(_one(s));
         bytes memory a = _anchor(1, auth1, 121);
-        vm.expectRevert(GrandpaVerifier.BrokenHeaderChain.selector);
+        vm.expectRevert(GrandpaLightClient.BrokenHeaderChain.selector);
         v.verifyBundle(p, a, ctx);
     }
 
     function test_rejects_justifiedPastEnactment() public {
-        GrandpaVerifier.Step memory s = _step("b143", "votes", auth1);
+        GrandpaLightClient.Step memory s = _step("b143", "votes", auth1);
         s.headers = new bytes[](4);
         s.headers[0] = _b(".grandpa.b143.header");
         s.headers[1] = _b(".grandpa.b142.header");
@@ -341,28 +343,28 @@ contract GrandpaVerifierTest is Test {
         s.headers[3] = _b(".grandpa.b140.header");
         bytes memory p = _bundle(_one(s));
         bytes memory a = _anchor(1, auth1, 121);
-        vm.expectRevert(GrandpaVerifier.JustifiedPastChange.selector);
+        vm.expectRevert(GrandpaLightClient.JustifiedPastChange.selector);
         v.verifyBundle(p, a, ctx);
     }
 
     function test_rejects_chainWithoutChange() public {
-        GrandpaVerifier.Step memory s = _step("b142", "votes", auth1);
+        GrandpaLightClient.Step memory s = _step("b142", "votes", auth1);
         s.headers = new bytes[](2);
         s.headers[0] = _b(".grandpa.b142.header");
         s.headers[1] = _b(".grandpa.b141.header");
         bytes memory p = _bundle(_one(s));
         bytes memory a = _anchor(1, auth1, 121);
-        vm.expectRevert(GrandpaVerifier.StepWithoutChange.selector);
+        vm.expectRevert(GrandpaLightClient.StepWithoutChange.selector);
         v.verifyBundle(p, a, ctx);
     }
 
     function test_rejects_intermediateStepWithoutChange() public {
-        GrandpaVerifier.Step[] memory steps = new GrandpaVerifier.Step[](2);
+        GrandpaLightClient.Step[] memory steps = new GrandpaLightClient.Step[](2);
         steps[0] = _step("b100", "votes", auth0);
         steps[1] = _step("b100", "votes", auth0);
         bytes memory p = _bundle(steps);
         bytes memory a = _anchor(0, auth0, 100);
-        vm.expectRevert(GrandpaVerifier.StepWithoutChange.selector);
+        vm.expectRevert(GrandpaLightClient.StepWithoutChange.selector);
         v.verifyBundle(p, a, ctx);
     }
 
@@ -412,19 +414,19 @@ contract GrandpaVerifierTest is Test {
 
     function test_rejects_badAnchorLength() public {
         bytes memory p = _bundle(_one(_step("b100", "votes", auth0)));
-        vm.expectRevert(GrandpaVerifier.InvalidTrustAnchor.selector);
+        vm.expectRevert(GrandpaLightClient.InvalidTrustAnchor.selector);
         v.verifyBundle(p, hex"00", ctx);
     }
 
     function test_rejects_noSteps() public {
-        bytes memory p = _bundle(new GrandpaVerifier.Step[](0));
+        bytes memory p = _bundle(new GrandpaLightClient.Step[](0));
         bytes memory a = _anchor(0, auth0, 100);
-        vm.expectRevert(GrandpaVerifier.InvalidPayloadShape.selector);
+        vm.expectRevert(GrandpaLightClient.InvalidPayloadShape.selector);
         v.verifyBundle(p, a, ctx);
     }
 
     function test_constructor_rejectsBadProfile() public {
-        vm.expectRevert(GrandpaVerifier.InvalidProfile.selector);
+        vm.expectRevert(GrandpaLightClient.InvalidProfile.selector);
         new GrandpaVerifier(address(0), EVM, CHAIN_ID, 0, keccak256(auth0), 100);
         vm.expectRevert(SubstrateEvmVerifierBase.InvalidEvmProfile.selector);
         new GrandpaVerifier(address(ed), bytes16(0), CHAIN_ID, 0, keccak256(auth0), 100);

@@ -56,16 +56,34 @@ library GrandpaLib {
 
     /// @notice Reverts unless `c` is a valid commit of the authority set `authorities`.
     function verifyCommit(Commit memory c, bytes memory authorities, IEd25519Verifier ed) internal view {
+        (uint256 signed, uint256 need,) = verifyVotes(c, authorities, ed);
+        if (signed < need) revert GrandpaThresholdNotMet(signed, need);
+    }
+
+    /// @notice Summed weight of a packed authority list. Reverts on a malformed or zero-weight list.
+    function totalWeight(bytes memory authorities) internal pure returns (uint256 total) {
         uint256 n = authorities.length / AUTHORITY_ENTRY_LENGTH;
         if (n == 0 || authorities.length % AUTHORITY_ENTRY_LENGTH != 0 || n > type(uint16).max) {
             revert InvalidAuthorities();
         }
-        uint256 total;
         for (uint256 i; i < n; ++i) {
             total += ScaleCodec.readU64(authorities, i * AUTHORITY_ENTRY_LENGTH + 32);
         }
         if (total == 0) revert InvalidAuthorities();
-        uint256 need = threshold(total);
+    }
+
+    /// @notice Verifies every vote in `c.votes` (a subset of a commit is allowed) and returns the
+    ///         signed weight, the set's threshold, and a bitmap of the signing authority indices
+    ///         (bit `i % 256` of word `i / 256`). Used whole by {verifyCommit} and in batches by
+    ///         `GrandpaCommitAccumulator`, which adds the weights of disjoint batches.
+    function verifyVotes(Commit memory c, bytes memory authorities, IEd25519Verifier ed)
+        internal
+        view
+        returns (uint256 signed, uint256 need, uint256[] memory signers)
+    {
+        uint256 n = authorities.length / AUTHORITY_ENTRY_LENGTH;
+        need = threshold(totalWeight(authorities));
+        signers = new uint256[]((n + 255) / 256);
 
         bytes memory votes = c.votes;
         if (votes.length == 0 || votes.length % VOTE_LENGTH != 0) revert InvalidVotesLength();
@@ -73,7 +91,6 @@ library GrandpaLib {
 
         bytes memory suffix = abi.encodePacked(ScaleCodec.le64(c.round), ScaleCodec.le64(c.setId));
         Ancestry memory anc;
-        uint256 signed;
         uint256 next; // smallest index the next vote may use
         for (uint256 v; v < count; ++v) {
             uint256 base = v * VOTE_LENGTH;
@@ -97,8 +114,8 @@ library GrandpaLib {
                 revert InvalidGrandpaSignature(idx);
             }
             signed += ScaleCodec.readU64(authorities, idx * AUTHORITY_ENTRY_LENGTH + 32);
+            signers[idx >> 8] |= 1 << (idx & 255);
         }
-        if (signed < need) revert GrandpaThresholdNotMet(signed, need);
     }
 
     // ── votes_ancestries ─────────────────────────────────────────────────────

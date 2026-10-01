@@ -7,7 +7,7 @@ import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol"
 import {BeefyLib} from "@hiero-ledger/clpr/libraries/proof/substrate/BeefyLib.sol";
 import {SubstrateTrie} from "@hiero-ledger/clpr/libraries/proof/substrate/SubstrateTrie.sol";
 import {BeefyParachainVerifier} from "@hiero-ledger/clpr/verifiers/evm/grandpa/BeefyParachainVerifier.sol";
-import {SubstrateEvmVerifierBase} from "@hiero-ledger/clpr/verifiers/evm/grandpa/SubstrateEvmVerifierBase.sol";
+import {SubstrateVerifierErrors} from "@hiero-ledger/clpr/verifiers/evm/grandpa/SubstrateVerifierErrors.sol";
 
 /// @notice BeefyParachainVerifier on the synthetic relay chain of fixtures/synthetic.json: 4-authority
 ///         BEEFY sets (secp256k1, threshold 3), multi-mountain MMRs, a relay header whose state holds
@@ -246,7 +246,7 @@ contract BeefyParachainVerifierTest is Test {
     function test_rejects_staleCommitment() public {
         bytes memory p = _typical();
         bytes memory a = _anchor(set10, set11, 207);
-        vm.expectRevert(SubstrateEvmVerifierBase.HeightTooOld.selector);
+        vm.expectRevert(SubstrateVerifierErrors.HeightTooOld.selector);
         v.verifyBundle(p, a, ctx);
     }
 

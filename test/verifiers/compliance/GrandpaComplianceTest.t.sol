@@ -6,6 +6,7 @@ import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {Blake2b} from "@hiero-ledger/clpr/libraries/proof/substrate/Blake2b.sol";
 import {ScaleCodec} from "@hiero-ledger/clpr/libraries/proof/substrate/ScaleCodec.sol";
 import {IEd25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/lib/IEd25519Verifier.sol";
+import {GrandpaLightClient} from "@hiero-ledger/clpr/verifiers/evm/grandpa/GrandpaLightClient.sol";
 import {GrandpaVerifier} from "@hiero-ledger/clpr/verifiers/evm/grandpa/GrandpaVerifier.sol";
 
 /// @dev Message-binding stand-in for the Ed25519 curve operation (forge 1.5 has no ed25519 signing
@@ -51,7 +52,7 @@ contract GrandpaComplianceTest is SubstrateEvmComplianceBase {
         return abi.encodePacked(uint64(0), keccak256(authorities), uint32(1));
     }
 
-    function _steps(bytes32 stateRoot) internal view returns (GrandpaVerifier.Step[] memory steps) {
+    function _steps(bytes32 stateRoot) internal view returns (GrandpaLightClient.Step[] memory steps) {
         bytes memory header = _header(keccak256("parent"), BLOCK, stateRoot);
         bytes32 h = Blake2b.hash256(header);
         bytes memory message =
@@ -59,7 +60,7 @@ contract GrandpaComplianceTest is SubstrateEvmComplianceBase {
         bytes memory sig = abi.encodePacked(
             sha256(abi.encodePacked(AUTHORITY_KEY, message)), sha256(abi.encodePacked(message, AUTHORITY_KEY))
         );
-        steps = new GrandpaVerifier.Step[](1);
+        steps = new GrandpaLightClient.Step[](1);
         steps[0].headers = new bytes[](1);
         steps[0].headers[0] = header;
         steps[0].round = ROUND;
