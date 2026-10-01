@@ -146,7 +146,7 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
 
     // ── EVM-store chains: full verifyBundle ──────────────────────────────────
 
-    for (const name of ["cronos", "mezo", "mantra", "injective"]) {
+    for (const name of ["cronos", "mezo", "mantra", "injective", "kava"]) {
         describe(name, () => {
             const fx = load(name);
             const s = sh(fx.raw.commit);
@@ -227,6 +227,8 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
                 // eth_getStorageAt at the same height, read when the fixture was recorded (see buildCometBftLiveFixture.ts).
                 if (name === "mantra") expect(BigInt(values[0])).toBe(1n);
                 if (name === "injective") expect(BigInt(values[0])).toBe(0x64n);
+                // Kava: WKAVA slot 0 = name() "Wrapped Kava" (eth_getStorageAt 0x5772…18), stored as a 32-byte word.
+                if (name === "kava") expect(Buffer.from(values[0].slice(2, 26), "hex").toString()).toBe("Wrapped Kava");
             });
 
             it("rejects: flipped signature byte", async () => {
@@ -273,7 +275,7 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
 
     // ── Light-client step on chains without an EVM store ────────────────────
 
-    for (const name of ["heimdall", "dydx", "provenance", "thorchain", "mantra", "injective"]) {
+    for (const name of ["heimdall", "dydx", "provenance", "thorchain", "mantra", "injective", "kava"]) {
         it(`${name}: live commit verifies through applyHops (= rotation cost), gas per signature`, async () => {
             const fx = load(name);
             const s = sh(fx.raw.commit);

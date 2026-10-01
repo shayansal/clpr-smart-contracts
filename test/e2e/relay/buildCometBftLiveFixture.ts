@@ -85,6 +85,16 @@ export const CHAINS: Record<string, ChainSpec> = {
         existenceSlot: "0x05", // slots 0-4 are zero; slot 5 holds 0x64 (eth_getStorageAt)
         rotationSearch: 3000 // the set hash changes ~12×/h
     },
+    // Kava: kava v0.28.2 pins kava-labs/ethermint v0.21.0-kava-v27.0, x/evm StoreKey "evm",
+    // KeyPrefixStorage 0x02 (iota+1 after code). statedb.Commit writes value.Bytes() (32 B, zero
+    // words stored, not deleted). CometBFT kava-labs fork v0.37.18-kava.1 (node reports 0.37.16).
+    kava: {
+        name: "kava", kind: "evm-bundle", rpc: "https://kava-rpc.polkachu.com",
+        storeKey: "evm", evmStateKeyPrefix: 0x02,
+        target: "0xc86c7c0efbd6a49b35e8714c5f59d99de09a225b", // WKAVA ("Wrapped Kava")
+        existenceSlot: "0x00", // name() short string "Wrapped Kava", equal to eth_getStorageAt
+        rotationSearch: 2000
+    },
     heimdall: {name: "heimdall", kind: "commit", rpc: "https://polygon-heimdall-rpc.publicnode.com"},
     dydx: {name: "dydx", kind: "commit", rpc: "https://dydx-rpc.publicnode.com"},
     provenance: {name: "provenance", kind: "commit", rpc: "https://rpc.provenance.io"},
