@@ -20,6 +20,8 @@
     "initia-live:refresh": "tsx test/e2e/relay/buildInitiaLiveFixture.ts",
     "test:e2e:fuel-live": "vitest run test/e2e/tests/verifiers/fuel-live.spec.ts",
     "fuel-live:refresh": "tsx test/e2e/relay/buildFuelLiveFixture.ts",
+    "test:e2e:waves-live": "vitest run test/e2e/tests/verifiers/waves-live.spec.ts",
+    "waves-live:refresh": "tsx test/e2e/relay/buildWavesLiveFixture.ts",
     "test:e2e:sei-verifier": "CLPR_BACKEND=sei vitest run test/e2e/tests/verifiers/sei-verifier.spec.ts",
     "test:e2e:all": "npm run test:e2e:anvil && npm run test:e2e:besu",
     "test:e2e:avalanche": "CLPR_BACKEND=avalanche vitest run",
