@@ -73,6 +73,7 @@ library NearLightClient {
     error TrieMalformedNode(uint256 index);
     error TrieKeyNotFound();
     error TrieProofTooLong();
+    error TrieKeyPresent();
     error TrieValueMismatch();
 
     // ── Light client ─────────────────────────────────────────────────────────
@@ -239,13 +240,36 @@ library NearLightClient {
     }
 
     /// @notice Prove `value` is stored under `key` in the trie with root `root`. `nodes` are the raw
-    ///         `RawTrieNodeWithSize` encodings on the path, root first. Existence proofs only.
+    ///         `RawTrieNodeWithSize` encodings on the path, root first.
     function verifyValue(bytes32 root, bytes memory key, bytes[] memory nodes, bytes memory value) internal pure {
+        (bool found, bytes memory node, uint256 valueOff) = _walk(root, key, nodes);
+        if (!found) revert TrieKeyNotFound();
+        _checkValue(node, valueOff, value);
+    }
+
+    /// @notice Prove no value is stored under `key`: the path, root first, ends where the key leaves
+    ///         the trie (a missing branch child, a diverging leaf or extension path, a leaf with a
+    ///         shorter key, or a branch without a value at the key's end).
+    function verifyAbsent(bytes32 root, bytes memory key, bytes[] memory nodes) internal pure {
+        (bool found,,) = _walk(root, key, nodes);
+        if (found) revert TrieKeyPresent();
+    }
+
+    /// @dev Walk `key` down the hash-linked `nodes`. Returns `found = true` with the node holding the
+    ///      key's `ValueRef` and its offset, or `found = false` when the last node proves the key is
+    ///      absent. Every node up to that point is hash-checked and fully length-checked; a path that
+    ///      ends on a child hash, or carries nodes after the value, reverts.
+    function _walk(bytes32 root, bytes memory key, bytes[] memory nodes)
+        private
+        pure
+        returns (bool found, bytes memory node, uint256 valueOff)
+    {
         uint256 nib = 0; // nibble position in key
         uint256 keyNibbles = key.length * 2;
         bytes32 expected = root;
         for (uint256 i = 0; i < nodes.length; i++) {
-            bytes memory node = nodes[i];
+            node = nodes[i];
+            bool last = i + 1 == nodes.length;
             if (sha256(node) != expected) revert TrieNodeHashMismatch(i);
             if (node.length < 1 + 8) revert TrieMalformedNode(i);
             uint8 tag = uint8(node[0]);
@@ -255,7 +279,7 @@ library NearLightClient {
                 if (off + 4 > node.length) revert TrieMalformedNode(i);
                 uint256 len = _readLe32(node, off);
                 off += 4;
-                if (len == 0 || off + len > node.length) revert TrieMalformedNode(i);
+                if (len == 0 || off + len + (tag == 0 ? 36 : 32) + 8 != node.length) revert TrieMalformedNode(i);
                 uint8 first = uint8(node[off]);
                 bool isLeaf = first & 0x20 != 0;
                 if (isLeaf != (tag == 0) || first & 0xc0 != 0 || (first & 0x10 == 0 && first & 0x0f != 0)) {
@@ -263,52 +287,63 @@ library NearLightClient {
                 }
                 // nibbles: optional odd first nibble in the low half of the flag byte, then full bytes
                 uint256 pathNibbles = (len - 1) * 2 + (first & 0x10 != 0 ? 1 : 0);
-                if (nib + pathNibbles > keyNibbles) revert TrieKeyNotFound();
-                uint256 p = 0;
-                if (first & 0x10 != 0) {
-                    if (first & 0x0f != _nibble(key, nib)) revert TrieKeyNotFound();
-                    p = 1;
-                }
-                for (uint256 j = 1; j < len; j++) {
-                    uint8 bt = uint8(node[off + j]);
-                    if (bt >> 4 != _nibble(key, nib + p) || bt & 0x0f != _nibble(key, nib + p + 1)) {
-                        revert TrieKeyNotFound();
-                    }
-                    p += 2;
-                }
+                if (!_pathMatches(node, off, len, first, key, nib, pathNibbles)) return (false, node, 0);
                 nib += pathNibbles;
                 off += len;
                 if (tag == 0) {
-                    if (nib != keyNibbles || i != nodes.length - 1) revert TrieKeyNotFound();
-                    if (off + 36 + 8 != node.length) revert TrieMalformedNode(i);
-                    _checkValue(node, off, value);
-                    return;
+                    // a leaf whose key is a strict prefix of this key leaves the key absent
+                    if (nib != keyNibbles) return (false, node, 0);
+                    if (!last) revert TrieProofTooLong();
+                    return (true, node, off);
                 }
-                if (off + 32 + 8 != node.length) revert TrieMalformedNode(i);
                 expected = _word(node, off);
             } else if (tag == 1 || tag == 2) {
                 // BranchNoValue(Children) | BranchWithValue(ValueRef, Children)
-                uint256 valueOff = off;
+                uint256 vOff = off;
                 if (tag == 2) off += 36;
                 if (off + 2 > node.length) revert TrieMalformedNode(i);
                 uint256 bitmap = uint256(uint8(node[off])) | (uint256(uint8(node[off + 1])) << 8);
                 off += 2;
-                uint256 children = _popcount16(bitmap);
-                if (off + children * 32 + 8 != node.length) revert TrieMalformedNode(i);
+                if (off + _popcount16(bitmap) * 32 + 8 != node.length) revert TrieMalformedNode(i);
                 if (nib == keyNibbles) {
-                    if (tag != 2 || i != nodes.length - 1) revert TrieKeyNotFound();
-                    _checkValue(node, valueOff, value);
-                    return;
+                    if (tag == 1) return (false, node, 0);
+                    if (!last) revert TrieProofTooLong();
+                    return (true, node, vOff);
                 }
                 uint256 c = _nibble(key, nib);
-                if (bitmap & (1 << c) == 0) revert TrieKeyNotFound();
+                if (bitmap & (1 << c) == 0) return (false, node, 0);
                 expected = _word(node, off + 32 * _popcount16(bitmap & ((1 << c) - 1)));
                 nib += 1;
             } else {
                 revert TrieMalformedNode(i);
             }
         }
-        revert TrieProofTooLong();
+        // the path ended on a child hash: the proof is missing nodes
+        revert TrieKeyNotFound();
+    }
+
+    /// @dev Whether the encoded nibble path of a leaf/extension equals `key` from nibble `nib`.
+    function _pathMatches(
+        bytes memory node,
+        uint256 off,
+        uint256 len,
+        uint8 first,
+        bytes memory key,
+        uint256 nib,
+        uint256 pathNibbles
+    ) private pure returns (bool) {
+        if (nib + pathNibbles > key.length * 2) return false;
+        uint256 p = 0;
+        if (first & 0x10 != 0) {
+            if (first & 0x0f != _nibble(key, nib)) return false;
+            p = 1;
+        }
+        for (uint256 j = 1; j < len; j++) {
+            uint8 bt = uint8(node[off + j]);
+            if (bt >> 4 != _nibble(key, nib + p) || bt & 0x0f != _nibble(key, nib + p + 1)) return false;
+            p += 2;
+        }
+        return true;
     }
 
     function _checkValue(bytes memory node, uint256 off, bytes memory value) private pure {

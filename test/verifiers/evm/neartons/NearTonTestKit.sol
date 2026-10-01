@@ -86,6 +86,83 @@ library NearTrieBuilder {
         }
     }
 
+    uint256 internal constant ALL = type(uint256).max;
+
+    /// @return root the trie root; @return nodes every node of the trie (for {pathTo})
+    function buildAll(Entry[] memory entries) internal pure returns (bytes32 root, bytes[] memory nodes) {
+        bytes[] memory acc = new bytes[](512);
+        uint256 len;
+        bytes memory node;
+        (node, len) = _node(entries, _all(entries.length), 0, ALL, acc, 0);
+        root = sha256(node);
+        nodes = new bytes[](len);
+        for (uint256 i = 0; i < len; i++) {
+            nodes[i] = acc[i];
+        }
+    }
+
+    /// @notice The nodes on `key`'s path, root first, ending at its value or where the key leaves the
+    ///         trie (an exclusion proof).
+    function pathTo(bytes32 root, bytes memory key, bytes[] memory all) internal pure returns (bytes[] memory path) {
+        bytes memory nib = nibblesOf(key);
+        bytes[] memory acc = new bytes[](128);
+        uint256 n;
+        uint256 pos;
+        bytes32 h = root;
+        for (;;) {
+            bytes memory node = _byHash(all, h);
+            acc[n++] = node;
+            uint8 tag = uint8(node[0]);
+            if (tag == 0 || tag == 3) {
+                uint256 len = uint256(uint8(node[1])) | uint256(uint8(node[2])) << 8;
+                uint8 first = uint8(node[5]);
+                bool ok = true;
+                uint256 p = pos;
+                if (first & 0x10 != 0) {
+                    ok = p < nib.length && uint8(nib[p]) == first & 0x0f;
+                    p++;
+                }
+                for (uint256 j = 1; ok && j < len; j++) {
+                    uint8 bt = uint8(node[5 + j]);
+                    ok = p + 1 < nib.length && uint8(nib[p]) == bt >> 4 && uint8(nib[p + 1]) == bt & 0x0f;
+                    p += 2;
+                }
+                if (!ok || tag == 0) break;
+                pos = p;
+                h = _at(node, 5 + len);
+            } else {
+                uint256 off = tag == 2 ? 37 : 1;
+                uint256 bitmap = uint256(uint8(node[off])) | uint256(uint8(node[off + 1])) << 8;
+                if (pos == nib.length) break;
+                uint256 c = uint8(nib[pos]);
+                if (bitmap & (1 << c) == 0) break;
+                uint256 k;
+                for (uint256 j = 0; j < c; j++) {
+                    if (bitmap & (1 << j) != 0) k++;
+                }
+                h = _at(node, off + 2 + 32 * k);
+                pos++;
+            }
+        }
+        path = new bytes[](n);
+        for (uint256 i = 0; i < n; i++) {
+            path[i] = acc[i];
+        }
+    }
+
+    function _byHash(bytes[] memory all, bytes32 h) private pure returns (bytes memory) {
+        for (uint256 i = 0; i < all.length; i++) {
+            if (sha256(all[i]) == h) return all[i];
+        }
+        revert("trie: node not found");
+    }
+
+    function _at(bytes memory b, uint256 off) private pure returns (bytes32 w) {
+        assembly ("memory-safe") {
+            w := mload(add(add(b, 0x20), off))
+        }
+    }
+
     function _all(uint256 n) private pure returns (uint256[] memory idx) {
         idx = new uint256[](n);
         for (uint256 i = 0; i < n; i++) {
@@ -130,7 +207,7 @@ library NearTrieBuilder {
         bytes[] memory acc,
         uint256 len
     ) private pure returns (bytes memory node, uint256 newLen) {
-        bool onPath = _contains(idx, target);
+        bool onPath = target == ALL || _contains(idx, target);
         uint256 slot = len;
         if (onPath) len++;
         bytes8 mem = bytes8(0);

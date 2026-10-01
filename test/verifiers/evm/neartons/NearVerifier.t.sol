@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {NearVerifier} from "@hiero-ledger/clpr/verifiers/evm/neartons/NearVerifier.sol";
+import {NearAnchoredVerifier} from "@hiero-ledger/clpr/verifiers/evm/neartons/NearAnchoredVerifier.sol";
 import {NearLightClient} from "@hiero-ledger/clpr/libraries/proof/near/NearLightClient.sol";
 import {ClprEd25519SignatureCache} from "@hiero-ledger/clpr/verifiers/evm/neartons/ClprEd25519SignatureCache.sol";
 import {ClprEd25519Check} from "@hiero-ledger/clpr/verifiers/evm/neartons/ClprEd25519Check.sol";
@@ -13,7 +14,7 @@ import {MockEd25519, NearTonFixtures, NearTrieBuilder} from "./NearTonTestKit.so
 /// @notice Synthetic NearVerifier suite: a CLPR Service at `clpr.near` on a 3-shard chain with
 ///         4 producers (stakes 10/20/30/40), the full verifyBundle / verifyConfig pipelines, epoch
 ///         rotation, and the negative cases.
-contract NearVerifierTest is Test {
+abstract contract NearVerifierFixture is Test {
     MockEd25519 internal ed;
     ClprEd25519SignatureCache internal cache;
     NearVerifier internal v;
@@ -35,7 +36,7 @@ contract NearVerifierTest is Test {
     bytes internal manifest;
     bytes internal control;
 
-    function setUp() public {
+    function setUp() public virtual {
         ed = new MockEd25519();
         cache = new ClprEd25519SignatureCache(ed);
         for (uint256 i = 0; i < 4; i++) {
@@ -108,7 +109,7 @@ contract NearVerifierTest is Test {
         return NearTrieBuilder.build(e, target);
     }
 
-    function _shards(bytes32 root) internal pure returns (NearVerifier.ShardRoots memory s) {
+    function _shards(bytes32 root) internal pure returns (NearAnchoredVerifier.ShardRoots memory s) {
         s.roots = new bytes32[](3);
         s.roots[0] = keccak256("shard0");
         s.roots[1] = root;
@@ -199,7 +200,9 @@ contract NearVerifierTest is Test {
         vm.expectRevert(err);
         v.verifyConfig(proof, channel, mp);
     }
+}
 
+contract NearVerifierTest is NearVerifierFixture {
     // ── happy paths ─────────────────────────────────────────────────────────
 
     function test_verifyBundle() public view {
@@ -410,7 +413,7 @@ contract NearVerifierTest is Test {
 
     function test_rejects_badAnchor() public {
         _expectBundleRevert(
-            abi.encode(_bundle(false)), hex"00", _ctx(), abi.encodePacked(NearVerifier.InvalidAnchor.selector)
+            abi.encode(_bundle(false)), hex"00", _ctx(), abi.encodePacked(NearAnchoredVerifier.InvalidAnchor.selector)
         );
     }
 
