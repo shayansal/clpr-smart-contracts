@@ -31,7 +31,7 @@ Every row below comes from that chain's live public RPC on 2026-10-01. The fixtu
 | **dYdX v4** | CometBFT 0.38.5 | Ed25519 | 21 | 10 | Native Cosmos modules only. No `wasm` store, no EVM (checked: `no such store: wasm`) | Light client fits (6.75M). No place for a CLPR Service contract |
 | **Provenance** | CometBFT 0.38.22 | Ed25519 | 100 | 18 | CosmWasm: `wasm` store, key `0x03‖contract(32 B)‖key` | Light client fits alone (12.6M). Needs a CosmWasm profile (§7); with a state proof it is ~15–16M |
 | **THORChain** | CometBFT 0.38.19 | Ed25519 | 99 (all power 100) | **67** | CosmWasm `wasm` store (App Layer) | **Does not fit**: commit alone is 43.6M gas (§6) |
-| **Arc** (Circle) | **Malachite** (Tendermint algorithm, not CometBFT) | Ed25519 over **SSZ** votes | 22 (testnet) | 11 | EVM (reth), **MPT**. Validator set is EVM storage of `ValidatorRegistry` at `0x3600…0002` | Live certificate checked off-chain. Different wire format, so a separate adapter (§7) |
+| **Arc** (Circle) | **Malachite** (Tendermint algorithm, not CometBFT) | Ed25519 over **SSZ** votes | 22 (testnet) | 11 | EVM (reth), **MPT**. Validator set is EVM storage of `ValidatorRegistry` at `0x3600…0002` | **Separate adapter:** [`../arc`](../arc/README.md) (`ArcMalachiteVerifier`, live bundle 7.9–9.1M gas) |
 
 "Min. signers" uses the live validator set sorted by power. The relay sends exactly that many
 signatures (§3.4).
