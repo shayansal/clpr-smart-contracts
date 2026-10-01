@@ -69,7 +69,8 @@ describe("XRPL verifier on live XRPL data (fixture replay)", () => {
         }
         wallet = createWalletClient({account: privateKeyToAccount(ANVIL_KEY), transport: http(rpc)});
         const ed = await deploy(loadArtifact("Ed25519Verifier"));
-        const keys = await deploy(loadArtifact("XrplUnlKeys"), [ed]);
+        const hasher = await deploy(loadArtifact("ClprSha512Hasher"));
+        const keys = await deploy(loadArtifact("XrplUnlKeys"), [ed, hasher]);
         lc = await deploy(lcArt, [keys]);
         verifierMain = await deploy(vArt, ["xrpl:0", lc]);
         verifierTest = await deploy(vArt, ["xrpl:1", lc]);

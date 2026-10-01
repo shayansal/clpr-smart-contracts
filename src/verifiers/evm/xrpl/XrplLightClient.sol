@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
-import {ClprSha512} from "@hiero-ledger/clpr/libraries/crypto/ClprSha512.sol";
 import {XrplUnlKeys} from "@hiero-ledger/clpr/verifiers/evm/xrpl/XrplUnlKeys.sol";
 import {XrplLib} from "@hiero-ledger/clpr/verifiers/evm/xrpl/XrplLib.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
@@ -26,6 +25,8 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 ///      ancestors[k-1]; each inner is one inner node's 16 child hashes, root first.
 contract XrplLightClient {
     XrplUnlKeys public immutable UNL_KEYS;
+    /// @dev {ClprSha512Hasher}: sha512Half for every ledger, validation and SHAMap hash.
+    address public immutable HASHER;
 
     error InvalidPayloadShape();
     error UnlMismatch();
@@ -42,6 +43,7 @@ contract XrplLightClient {
     constructor(XrplUnlKeys unlKeys) {
         if (address(unlKeys) == address(0)) revert ZeroUnlKeys();
         UNL_KEYS = unlKeys;
+        HASHER = unlKeys.HASHER();
     }
 
     struct Unl {
@@ -100,9 +102,9 @@ contract XrplLightClient {
         if (p.length < 5) revert InvalidPayloadShape();
         Unl memory unl;
         (unl.masters, unl.signers, unl.seqs) = UNL_KEYS.configUnl(proof);
-        XrplLib.Header memory hd = XrplLib.parseHeader(RLP.readBytes(p[1]));
+        XrplLib.Header memory hd = XrplLib.parseHeader(RLP.readBytes(p[1]), HASHER);
         _requireQuorum(unl, RLP.readList(p[2]), hd);
-        bytes32 key = ClprSha512.half(abi.encodePacked(uint16(0x0061), account)); // keylet::account
+        bytes32 key = XrplLib.half(HASHER, abi.encodePacked(uint16(0x0061), account)); // keylet::account
         accountRoot = RLP.readBytes(p[4]);
         UNL_KEYS.verifyStateEntry(hd.accountHash, key, _blobs(p[3]), accountRoot);
         ledgerSeq = hd.seq;
@@ -144,7 +146,7 @@ contract XrplLightClient {
             (unl.signers, unl.seqs) = UNL_KEYS.applyManifests(unl.masters, unl.signers, unl.seqs, blobs);
             rotated = true;
         }
-        XrplLib.Header memory hd = XrplLib.parseHeader(RLP.readBytes(p[2]));
+        XrplLib.Header memory hd = XrplLib.parseHeader(RLP.readBytes(p[2]), HASHER);
         if (hd.seq < minLedgerSeq) revert StaleLedger(hd.seq, minLedgerSeq);
         _requireQuorum(unl, RLP.readList(p[3]), hd);
         lg.seq = hd.seq;
@@ -155,7 +157,7 @@ contract XrplLightClient {
 
     /// @dev Inclusion of one [ledgerRef, tx, meta, inners] entry in its ledger's transaction tree,
     ///      and tesSUCCESS.
-    function _proveTx(Memory.Slice item, bytes32[] memory txRoots) internal pure returns (ProvenTx memory out) {
+    function _proveTx(Memory.Slice item, bytes32[] memory txRoots) internal view returns (ProvenTx memory out) {
         Memory.Slice[] memory e = RLP.readList(item);
         if (e.length != 4) revert InvalidPayloadShape();
         uint256 ref = RLP.readUint256(e[0]);
@@ -163,21 +165,21 @@ contract XrplLightClient {
         out.tx = RLP.readBytes(e[1]);
         bytes32 leaf;
         (out.id, leaf) = _txLeaf(out.tx, RLP.readBytes(e[2]));
-        XrplLib.verifyPath(txRoots[ref], out.id, _blobs(e[3]), leaf);
+        XrplLib.verifyPath(txRoots[ref], out.id, _blobs(e[3]), leaf, HASHER);
     }
 
     /// @dev Transaction id and tx+meta leaf hash; reverts unless the metadata says tesSUCCESS.
-    function _txLeaf(bytes memory txb, bytes memory meta) private pure returns (bytes32 id, bytes32 leaf) {
+    function _txLeaf(bytes memory txb, bytes memory meta) private view returns (bytes32 id, bytes32 leaf) {
         if (!XrplLib.metaSucceeded(meta)) revert TransactionFailed();
-        id = XrplLib.txId(txb);
-        leaf = XrplLib.txLeafHash(txb, meta, id);
+        id = XrplLib.txId(txb, HASHER);
+        leaf = XrplLib.txLeafHash(txb, meta, id, HASHER);
     }
 
     // ── consensus ─────────────────────────────────────────────────────────────
 
     /// @dev At least ceil(0.8 n) distinct UNL validators signed a full validation of `hd`. The
     ///      negative UNL, which can lower rippled's quorum to 60%, is not applied: stricter.
-    function _requireQuorum(Unl memory unl, Memory.Slice[] memory vals, XrplLib.Header memory hd) internal pure {
+    function _requireQuorum(Unl memory unl, Memory.Slice[] memory vals, XrplLib.Header memory hd) internal view {
         uint256 n = unl.signers.length;
         uint256 need = (n * 8 + 9) / 10;
         if (vals.length < need) revert QuorumNotReached(vals.length, need);
@@ -188,7 +190,7 @@ contract XrplLightClient {
             uint256 idx = RLP.readUint256(e[0]);
             if (idx >= n || (k > 0 && idx <= prev)) revert ValidatorIndexOrder(idx);
             prev = idx;
-            (bytes32 digest, bytes32 r, bytes32 s) = XrplLib.validationDigest(RLP.readBytes(e[1]), hd.hash, hd.seq);
+            (bytes32 digest, bytes32 r, bytes32 s) = XrplLib.validationDigest(RLP.readBytes(e[1]), hd.hash, hd.seq, HASHER);
             if (!XrplLib.signedBy(digest, r, s, unl.signers[idx])) revert BadValidationSignature(idx);
         }
     }
@@ -211,7 +213,7 @@ contract XrplLightClient {
         for (uint256 k = 0; k < ancestors.length; ++k) {
             Memory.Slice[] memory e = RLP.readList(ancestors[k]);
             if (e.length == 0 || e.length > 3) revert InvalidPayloadShape();
-            XrplLib.Header memory h = XrplLib.parseHeader(RLP.readBytes(e[0]));
+            XrplLib.Header memory h = XrplLib.parseHeader(RLP.readBytes(e[0]), HASHER);
             if (e.length == 1) {
                 if (h.hash != parent) revert AncestorMismatch(k);
             } else {

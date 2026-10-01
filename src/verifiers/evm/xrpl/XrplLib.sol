@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
-import {ClprSha512} from "@hiero-ledger/clpr/libraries/crypto/ClprSha512.sol";
 
 /// @title XrplLib
 /// @notice XRP Ledger binary formats and hashes, as rippled defines them (XRPLF/rippled @ ddbc5f1):
@@ -145,6 +144,24 @@ library XrplLib {
         }
     }
 
+    // ── SHA-512Half ───────────────────────────────────────────────────────────
+
+    error HasherFailed();
+
+    /// @notice sha512Half via the {ClprSha512Hasher} contract at `hasher` (raw calldata in, 64-byte
+    ///         digest out). One deployed hasher keeps the XRPL contracts small and is about twice
+    ///         as fast as the via-IR library inside them.
+    function half(address hasher, bytes memory data) internal view returns (bytes32 h) {
+        assembly ("memory-safe") {
+            let ok := staticcall(gas(), hasher, add(data, 0x20), mload(data), 0x00, 0x40)
+            if iszero(and(ok, eq(returndatasize(), 0x40))) {
+                mstore(0x00, 0x6da4348c) // HasherFailed()
+                revert(0x1c, 0x04)
+            }
+            h := mload(0x00)
+        }
+    }
+
     // ── Ledger header ─────────────────────────────────────────────────────────
 
     struct Header {
@@ -155,22 +172,22 @@ library XrplLib {
         bytes32 hash;
     }
 
-    function parseHeader(bytes memory h) internal pure returns (Header memory hd) {
+    function parseHeader(bytes memory h, address hasher) internal view returns (Header memory hd) {
         if (h.length != HEADER_LENGTH) revert BadHeaderLength(h.length);
         hd.seq = readU32(h, 0);
         hd.parentHash = readB32(h, 12);
         hd.txHash = readB32(h, 44);
         hd.accountHash = readB32(h, 76);
-        hd.hash = ClprSha512.half(abi.encodePacked(PREFIX_LEDGER, h));
+        hd.hash = half(hasher, abi.encodePacked(PREFIX_LEDGER, h));
     }
 
     // ── Validations ───────────────────────────────────────────────────────────
 
     /// @notice Check a serialized STValidation is a full validation of (ledgerHash, seq) and return
     ///         its signing digest and (r, s). The signer is checked by the caller with ecrecover.
-    function validationDigest(bytes memory v, bytes32 ledgerHash, uint32 seq)
+    function validationDigest(bytes memory v, bytes32 ledgerHash, uint32 seq, address hasher)
         internal
-        pure
+        view
         returns (bytes32 digest, bytes32 r, bytes32 s)
     {
         uint256 i;
@@ -210,7 +227,7 @@ library XrplLib {
             mcopy(add(d, 4), src, sigStart)
             mcopy(add(add(d, 4), sigStart), add(src, sigEnd), sub(mload(v), sigEnd))
         }
-        digest = ClprSha512.half(pre);
+        digest = half(hasher, pre);
     }
 
     /// @notice Strict DER ECDSA (r, s) for secp256k1 as rippled emits it (`ecdsaCanonicality`):
@@ -289,20 +306,25 @@ library XrplLib {
     /// @notice Walk `inners` (each the 16 child hashes of one inner node, root first) from `root`
     ///         along `key` and require the reached child to be `leafHash`. The key is bound by the
     ///         leaf hash itself (both leaf kinds hash their key), so a leaf at any depth is sound.
-    function verifyPath(bytes32 root, bytes32 key, bytes[] memory inners, bytes32 leafHash) internal pure {
+    function verifyPath(bytes32 root, bytes32 key, bytes[] memory inners, bytes32 leafHash, address hasher)
+        internal
+        view {
         uint256 depth = inners.length;
         if (depth == 0 || depth > 64) revert SHAMapPathTooLong();
         bytes32 expect = root;
         for (uint256 d = 0; d < depth; ++d) {
-            expect = _innerStep(inners[d], expect, key, d);
+            expect = _innerStep(inners[d], expect, key, d, hasher);
         }
         if (expect != leafHash) revert SHAMapHashMismatch(depth);
     }
 
     /// @dev Check one inner node against its expected hash and return the child on `key`'s path.
-    function _innerStep(bytes memory node, bytes32 expect, bytes32 key, uint256 d) private pure returns (bytes32) {
+    function _innerStep(bytes memory node, bytes32 expect, bytes32 key, uint256 d, address hasher)
+        private
+        view
+        returns (bytes32) {
         if (node.length != 512) revert SHAMapHashMismatch(d);
-        if (ClprSha512.half(abi.encodePacked(PREFIX_INNER, node)) != expect) revert SHAMapHashMismatch(d);
+        if (half(hasher, abi.encodePacked(PREFIX_INNER, node)) != expect) revert SHAMapHashMismatch(d);
         return readB32(node, ((uint256(key) >> (252 - 4 * d)) & 15) * 32);
     }
 
@@ -329,16 +351,19 @@ library XrplLib {
         if (!hasLast) revert MissingField(STI_UINT32, 27);
     }
 
-    function txId(bytes memory tx) internal pure returns (bytes32) {
-        return ClprSha512.half(abi.encodePacked(PREFIX_TX_ID, tx));
+    function txId(bytes memory tx, address hasher) internal view returns (bytes32) {
+        return half(hasher, abi.encodePacked(PREFIX_TX_ID, tx));
     }
 
-    function txLeafHash(bytes memory tx, bytes memory meta, bytes32 id) internal pure returns (bytes32) {
-        return ClprSha512.half(abi.encodePacked(PREFIX_TX_LEAF, encodeVL(tx.length), tx, encodeVL(meta.length), meta, id));
+    function txLeafHash(bytes memory tx, bytes memory meta, bytes32 id, address hasher)
+        internal
+        view
+        returns (bytes32) {
+        return half(hasher, abi.encodePacked(PREFIX_TX_LEAF, encodeVL(tx.length), tx, encodeVL(meta.length), meta, id));
     }
 
-    function stateLeafHash(bytes memory data, bytes32 key) internal pure returns (bytes32) {
-        return ClprSha512.half(abi.encodePacked(PREFIX_STATE_LEAF, data, key));
+    function stateLeafHash(bytes memory data, bytes32 key, address hasher) internal view returns (bytes32) {
+        return half(hasher, abi.encodePacked(PREFIX_STATE_LEAF, data, key));
     }
 
     function encodeVL(uint256 n) internal pure returns (bytes memory) {

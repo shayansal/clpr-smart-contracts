@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
-import {ClprSha512} from "@hiero-ledger/clpr/libraries/crypto/ClprSha512.sol";
 import {IEd25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/lib/IEd25519Verifier.sol";
 import {XrplLib} from "@hiero-ledger/clpr/verifiers/evm/xrpl/XrplLib.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
@@ -15,6 +14,8 @@ contract XrplUnlKeys {
     bytes32 internal constant SKIP_KEY = 0xb4979a36cdc7f3d3d5c31a4eae2ac7d7209dda877588b9afc66799692ab0d66b;
 
     IEd25519Verifier public immutable ED25519;
+    /// @dev {ClprSha512Hasher}, also used by {XrplLightClient}.
+    address public immutable HASHER;
 
     error InvalidPayloadShape();
     error EmptyUnl();
@@ -23,9 +24,10 @@ contract XrplUnlKeys {
     error BadManifestSignature();
     error ZeroEd25519Verifier();
 
-    constructor(IEd25519Verifier ed25519) {
-        if (address(ed25519) == address(0)) revert ZeroEd25519Verifier();
+    constructor(IEd25519Verifier ed25519, address hasher) {
+        if (address(ed25519) == address(0) || hasher.code.length == 0) revert ZeroEd25519Verifier();
         ED25519 = ed25519;
+        HASHER = hasher;
     }
 
     /// @notice Config-time UNL, field 0 of `proof`: [[masterKey(33), compressedSigningKey(33), manifestSeq], ...].
@@ -77,7 +79,7 @@ contract XrplUnlKeys {
             if (!_masterSigned(m)) revert BadManifestSignature();
             address newSigner = XrplLib.secpAddress(m.signingKey);
             (bytes32 r, bytes32 s) = XrplLib.parseDer(m.signature, 0, m.signature.length);
-            if (!XrplLib.signedBy(ClprSha512.half(m.signingData), r, s, newSigner)) revert BadManifestSignature();
+            if (!XrplLib.signedBy(XrplLib.half(HASHER, m.signingData), r, s, newSigner)) revert BadManifestSignature();
             signers[idx] = newSigner;
             seqs[idx] = m.sequence;
         }
@@ -85,8 +87,8 @@ contract XrplUnlKeys {
     }
 
     /// @notice SHAMap state proof: `data` is the ledger entry for `key` under state root `root`.
-    function verifyStateEntry(bytes32 root, bytes32 key, bytes[] memory inners, bytes memory data) external pure {
-        XrplLib.verifyPath(root, key, inners, XrplLib.stateLeafHash(data, key));
+    function verifyStateEntry(bytes32 root, bytes32 key, bytes[] memory inners, bytes memory data) external view {
+        XrplLib.verifyPath(root, key, inners, XrplLib.stateLeafHash(data, key, HASHER), HASHER);
     }
 
     /// @notice Hash of ledger `seq` from the LedgerHashes skip list (keylet::skip() =
@@ -94,10 +96,10 @@ contract XrplUnlKeys {
     ///         under state root `root`.
     function skipListHash(bytes32 root, bytes[] memory inners, bytes memory entry, uint32 seq)
         external
-        pure
+        view
         returns (bytes32)
     {
-        XrplLib.verifyPath(root, SKIP_KEY, inners, XrplLib.stateLeafHash(entry, SKIP_KEY));
+        XrplLib.verifyPath(root, SKIP_KEY, inners, XrplLib.stateLeafHash(entry, SKIP_KEY, HASHER), HASHER);
         return XrplLib.skipListHash(entry, seq);
     }
 
@@ -114,6 +116,6 @@ contract XrplUnlKeys {
             return ED25519.verify(pk, m.signingData, m.masterSignature);
         }
         (bytes32 r, bytes32 s) = XrplLib.parseDer(m.masterSignature, 0, m.masterSignature.length);
-        return XrplLib.signedBy(ClprSha512.half(m.signingData), r, s, XrplLib.secpAddress(m.master));
+        return XrplLib.signedBy(XrplLib.half(HASHER, m.signingData), r, s, XrplLib.secpAddress(m.master));
     }
 }

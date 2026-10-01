@@ -194,3 +194,32 @@ contract ClprHashesMarginalGasTest is Test {
         emit log_named_uint("blake3 per compression (marginal, 17)", (g2 - g1) / 17);
     }
 }
+
+contract ClprSha512HasherTest is Test {
+    function test_hasherMatchesLibrary() public {
+        // deployed from its artifact: importing it would force this file onto its legacy profile
+        address h = deployCode("ClprSha512Hasher.sol:ClprSha512Hasher");
+        uint256[9] memory lens = [uint256(0), 1, 111, 112, 127, 128, 129, 516, 3000];
+        for (uint256 k = 0; k < lens.length; ++k) {
+            bytes memory d = new bytes(lens[k]);
+            for (uint256 i = 0; i < d.length; ++i) {
+                d[i] = bytes1(uint8(i % 251));
+            }
+            (bool ok, bytes memory out) = h.staticcall(d);
+            assertTrue(ok);
+            (bytes32 hi, bytes32 lo) = ClprSha512.hash(d);
+            assertEq(out, abi.encodePacked(hi, lo));
+        }
+        bytes memory x = new bytes(2280);
+        uint256 g = gasleft();
+        (bool ok2,) = h.staticcall(x);
+        uint256 g2 = g - gasleft();
+        x = new bytes(1000);
+        g = gasleft();
+        h.staticcall(x);
+        uint256 g1 = g - gasleft();
+        assertTrue(ok2);
+        emit log_named_uint("hasher per block (marginal)", (g2 - g1) / 10);
+        emit log_named_uint("hasher 8-block call", g1);
+    }
+}
