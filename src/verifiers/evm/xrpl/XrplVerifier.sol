@@ -14,7 +14,7 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 /// @title XrplVerifier
 /// @notice XRP Ledger → Hiero `IClprVerifier`. {XrplLightClient} checks the UNL validations, the
 ///         ledger headers and the transaction-tree inclusion of each transaction with its metadata
-///         (tesSUCCESS). This contract applies the XRPL CLPR outbox rules (~/clpr/xrpl-design.md §1):
+///         (tesSUCCESS). This contract applies the XRPL CLPR outbox rules (README.md, "Outbox rules"):
 ///
 ///         - XRPL has no CLPR Service (XLS-101 is a draft). Each channel has an outbox account: a
 ///           k-of-n multisig with its master key disabled and no regular key.

@@ -12,8 +12,7 @@ import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 
 /// @title HyperEvmVerifier
-/// @notice Hyperliquid HyperEVM → Hiero `IClprVerifier`, the release-today design of
-///         `~/clpr/hard4-release.md`.
+/// @notice Hyperliquid HyperEVM → Hiero `IClprVerifier` (attestor tier; see README.md).
 ///
 ///         TRUST: ATTESTOR-TRUSTED. HyperEVM finality is not proven. Nothing that Hyperliquid's
 ///         validators sign covers HyperEVM blocks (Bridge2 validators sign bridge actions only), so a
