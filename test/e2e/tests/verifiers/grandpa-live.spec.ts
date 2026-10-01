@@ -28,6 +28,8 @@ import {
     decodeJustification,
     encodeBeefyBundle,
     encodeGrandpaBundle,
+    encodeGrandpaEntryProof,
+    encodeGrandpaPalletBundle,
     encodeHeader,
     EVM_PALLET_PREFIX,
     fromHex,
@@ -37,24 +39,33 @@ import {
     packBeefySignatures,
     packGrandpaAuthorities,
     packGrandpaVotes,
+    palletQueueKey,
+    palletServiceKey,
     paraHeadKey,
     Scale,
+    splitVotes,
     toHex,
     type BeefyCommit,
     type GrandpaStep
 } from "../../relay/substrate.js";
 
-/// GrandpaVerifier (Bittensor) and BeefyParachainVerifier (Hydration) against LIVE mainnet data,
+/// GrandpaVerifier (Bittensor, Bifrost Network), GrandpaPalletVerifier + GrandpaCommitAccumulator
+/// (Chainflip) and BeefyParachainVerifier (Hydration) against LIVE mainnet data,
 /// replayed offline from test/e2e/fixtures/grandpa-live/*.json (re-record:
 /// `npm run grandpa-live:refresh`). The fixtures hold raw public-RPC responses; every payload below
 /// is re-derived from them with relay/substrate.ts and run through the unmodified verifiers:
 ///   - Bittensor: a real GRANDPA justification (14 of 20 ed25519 precommits through the
 ///     pure-Solidity Ed25519Verifier), the real set change 5 → 6 (ScheduledChange digest), and
 ///     real Frontier AccountStorages read proofs (Substrate trie, blake2 via the 0x09 precompile).
+///   - Bifrost Network: the same path (13 of 19 precommits; the set id changes every 300-block
+///     session with the same keys).
+///   - Chainflip: a real commit of 139 authorities (92 precommits) verified in batches by the
+///     accumulator, then the bundle; the real set change; pallet-storage keys proven absent (no CLPR
+///     pallet exists) and real items (Grandpa::CurrentSetId, a System::Account entry) proven present.
 ///   - Hydration: a real Polkadot BEEFY commitment (401 of 600 secp256k1 signatures), the MMR leaf,
 ///     the relay header, Paras::Heads(2034) from relay state, the Hydration header and its
 ///     AccountStorages proofs; plus a real BEEFY set rotation at a session boundary.
-/// No ClprService is deployed on either chain, so the "service" is a live contract with storage:
+/// No ClprService is deployed on any of these chains, so on the Frontier chains the "service" is a live contract with storage:
 /// its channel slots are absent (proven by non-existence → zero metadata), and real non-zero slots
 /// of the same contract are proven through the trie harness.
 /// Gas and calldata are checked against Hedera's 15M gas / 128 KB calldata limits.
@@ -65,6 +76,8 @@ const ANVIL_PORT = Number(process.env.CLPR_ANVIL_PORT_A ?? 8611);
 const ANVIL_KEY: Hex = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const HEDERA_GAS_LIMIT = 15_000_000n;
 const HEDERA_CALLDATA_LIMIT = 131_072;
+/// Precommits per GrandpaCommitAccumulator transaction (each ed25519 check costs about 585k gas).
+const ACC_BATCH = 20;
 
 const load = (name: string): any => JSON.parse(readFileSync(path.join(FIXTURE_DIR, `${name}.json`), "utf8"));
 const bytes = (h: Hex) => (h.length - 2) / 2;
@@ -139,108 +152,299 @@ describe("Substrate verifiers on live mainnet data (fixture replay)", () => {
         console.table(report);
     });
 
-    // ── Bittensor: GRANDPA ──────────────────────────────────────────────────
+    // ── GRANDPA + Frontier EVM: Bittensor, Bifrost Network ──────────────────
 
-    describe("Bittensor (GRANDPA, ed25519)", () => {
-        const fx = load("bittensor");
-        const art = loadArtifact("GrandpaVerifier");
+    /// GrandpaVerifier against a live GRANDPA solo chain with Frontier: a rotation (the first block
+    /// of the current set, justified by the previous set) and a newer justification of that set.
+    function grandpaEvmSuite(name: string, title: string) {
+        describe(title, () => {
+            const fx = load(name);
+            const art = loadArtifact("GrandpaVerifier");
+            let verifier: Hex;
+            const ctx = channelContext(fx.channelId, fx.contract);
+            const authBefore = packGrandpaAuthorities(fx.rotation.authoritiesBefore);
+            const authAfter = packGrandpaAuthorities(fx.typical.authorities);
+            const rotationNumber = parseInt(fx.rotation.block.header.number, 16);
+            const setBefore = BigInt(fx.rotation.setIdBefore), setAfter = BigInt(fx.typical.setId);
+
+            const step = (block: any, authorities: Buffer, opts: {all?: boolean} = {}): GrandpaStep => {
+                const j = decodeJustification(fromHex(block.justification));
+                const v = packGrandpaVotes(j, authorities, opts);
+                return {headers: [encodeHeader(block.header)], round: j.round, votes: v.votes, ancestry: v.ancestry, authorities};
+            };
+            const typicalProof = (s = step(fx.typical.block, authAfter), stateProof: string[] = fx.typical.stateProof) =>
+                encodeGrandpaBundle({steps: [s], stateProof: stateProof.map(fromHex)});
+            const typicalAnchor = grandpaAnchor(setAfter, authAfter, rotationNumber + 1);
+            const read = (proof: Hex, anchor: Hex) =>
+                pub.readContract({address: verifier, abi: art.abi, functionName: "verifyBundle", args: [proof, anchor, ctx]}) as Promise<any>;
+
+            beforeAll(async () => {
+                verifier = await deploy(art.abi, art.bytecode, [
+                    ed25519, toHex(EVM_PALLET_PREFIX), fx.evmChainId, setBefore, keccak256(toHex(authBefore)), rotationNumber
+                ]);
+            });
+
+            it("derives the Frontier AccountStorages key on-chain exactly as the chain does", async () => {
+                const slot = fx.typical.realSlots[0] as Hex;
+                const onChain = await pub.readContract({address: verifier, abi: art.abi, functionName: "accountStorageKey", args: [fx.contract, slot]});
+                expect(onChain).toBe(toHex(accountStorageKey(fx.contract, slot)));
+            });
+
+            it("verifies a real justification + storage proof (typical bundle)", async () => {
+                const [metadata, payloads, newAnchor, newAnchorId] = await read(typicalProof(), typicalAnchor);
+                expect(metadata.nextMessageId).toBe(0n);
+                expect(metadata.sentRunningHash).toBe("0x" + "00".repeat(32));
+                expect(payloads.length).toBe(0);
+                expect(newAnchor).toBe("0x");
+                expect(newAnchorId).toBe("0x");
+                const g = await txGas(verifier, art.abi, "verifyBundle", [typicalProof(), typicalAnchor, ctx]);
+                const s = step(fx.typical.block, authAfter);
+                checkHedera(`${name} typical`, g, {block: parseInt(fx.typical.block.header.number, 16), signatures: s.votes.length / 102, authorities: authAfter.length / 40});
+            });
+
+            it(`follows the real authority-set change and returns the new anchor`, async () => {
+                const header = encodeHeader(fx.rotation.block.header);
+                const change = grandpaScheduledChange(header)!;
+                expect(change.delay).toBe(0);
+                // The set announced in the digest is the set whose authorities signed the typical justification.
+                expect(change.authorities.equals(authAfter)).toBe(true);
+                const proof = encodeGrandpaBundle({steps: [step(fx.rotation.block, authBefore)], stateProof: fx.rotation.stateProof.map(fromHex)});
+                const anchor = grandpaAnchor(setBefore, authBefore, rotationNumber);
+                const [, , newAnchor, newAnchorId] = await read(proof, anchor);
+                expect(newAnchor).toBe(grandpaAnchor(setAfter, authAfter, rotationNumber + 1));
+                expect(newAnchorId).toBe("0x" + setAfter.toString(16).padStart(16, "0"));
+                checkHedera(`${name} rotation (set ${setBefore}→${setAfter})`, await txGas(verifier, art.abi, "verifyBundle", [proof, anchor, ctx]), {block: rotationNumber});
+            });
+
+            it("proves real non-zero EVM storage slots through the trie", async () => {
+                const stateRoot = toHex(decodeHeader(encodeHeader(fx.typical.block.header)).stateRoot);
+                for (const slot of fx.typical.realSlots as Hex[]) {
+                    const [exists, value] = (await pub.readContract({
+                        address: harness, abi: harnessArt.abi, functionName: "get",
+                        args: [stateRoot, fx.typical.stateProof, toHex(accountStorageKey(fx.contract, slot))]
+                    })) as [boolean, Hex];
+                    expect(exists).toBe(true);
+                    expect(bytes(value)).toBe(32);
+                }
+            });
+
+            it("rejects a tampered signature", async () => {
+                const s = step(fx.typical.block, authAfter);
+                s.votes[38 + 5] ^= 1;
+                await expectRevert(read(typicalProof(s), typicalAnchor), "InvalidGrandpaSignature");
+            });
+
+            it("rejects a commit below threshold", async () => {
+                const s = step(fx.typical.block, authAfter);
+                s.votes = s.votes.subarray(0, s.votes.length - 102);
+                await expectRevert(read(typicalProof(s), typicalAnchor), "GrandpaThresholdNotMet");
+            });
+
+            it("rejects the wrong authority set", async () => {
+                const wrong = Buffer.from(authAfter);
+                wrong[0] ^= 1;
+                await expectRevert(read(typicalProof(), grandpaAnchor(setAfter, wrong, rotationNumber + 1)), "AuthoritySetMismatch");
+            });
+
+            it("rejects the previous set's anchor", async () => {
+                // Different keys: the list no longer matches. Same keys (Bifrost): the signatures bind set_id.
+                const expected = authBefore.equals(authAfter) ? "InvalidGrandpaSignature" : "AuthoritySetMismatch";
+                await expectRevert(read(typicalProof(), grandpaAnchor(setBefore, authBefore, rotationNumber)), expected);
+            });
+
+            it("rejects a replayed set id (signatures bind set_id)", async () => {
+                await expectRevert(read(typicalProof(), grandpaAnchor(setAfter + 1n, authAfter, rotationNumber + 1)), "InvalidGrandpaSignature");
+            });
+
+            it("rejects a block below the anchor height (stale)", async () => {
+                await expectRevert(read(typicalProof(), grandpaAnchor(setAfter, authAfter, parseInt(fx.typical.block.header.number, 16) + 1)), "HeightTooOld");
+            });
+
+            it("rejects a storage proof with a node missing", async () => {
+                // Drop the trie root node: no slot can be read (present or absent) without it.
+                const root = decodeHeader(encodeHeader(fx.typical.block.header)).stateRoot;
+                const pruned = (fx.typical.stateProof as string[]).filter((n) => !blake2_256(fromHex(n)).equals(root));
+                expect(pruned.length).toBe(fx.typical.stateProof.length - 1);
+                await expectRevert(read(typicalProof(undefined, pruned), typicalAnchor), "MissingProofNode");
+            });
+        });
+    }
+
+    grandpaEvmSuite("bittensor", "Bittensor (GRANDPA, ed25519)");
+    grandpaEvmSuite("bifrost", "Bifrost Network (GRANDPA, ed25519)");
+
+    // ── Chainflip: GRANDPA with a commit accumulator, native pallet storage ──
+
+    describe("Chainflip (GRANDPA, 139 authorities, accumulated commits, pallet storage)", () => {
+        const fx = load("chainflip");
+        const art = loadArtifact("GrandpaPalletVerifier");
+        const accArt = loadArtifact("GrandpaCommitAccumulator");
         let verifier: Hex;
-        const ctx = channelContext(fx.channelId, fx.contract);
+        let acc: Hex;
+        // No CLPR pallet on Chainflip: the service address is a placeholder 32-byte account id.
+        const service = ("0x" + "00".repeat(31) + "01") as Hex;
+        const ctx = channelContext(fx.channelId, service);
+        const pallet = fromHex(fx.pallet);
         const authBefore = packGrandpaAuthorities(fx.rotation.authoritiesBefore);
         const authAfter = packGrandpaAuthorities(fx.typical.authorities);
         const rotationNumber = parseInt(fx.rotation.block.header.number, 16);
+        const setBefore = BigInt(fx.rotation.setIdBefore), setAfter = BigInt(fx.typical.setId);
+        const typicalNumber = parseInt(fx.typical.block.header.number, 16);
+        const typicalAnchor = grandpaAnchor(setAfter, authAfter, rotationNumber + 1);
 
-        const step = (block: any, authorities: Buffer, opts: {all?: boolean} = {}): GrandpaStep => {
+        const commit = (block: any, authorities: Buffer) => {
             const j = decodeJustification(fromHex(block.justification));
-            const v = packGrandpaVotes(j, authorities, opts);
-            return {headers: [encodeHeader(block.header)], round: j.round, votes: v.votes, ancestry: v.ancestry, authorities};
+            const v = packGrandpaVotes(j, authorities);
+            return {j, ...v, targetHash: toHex(blake2_256(encodeHeader(block.header))), targetNumber: parseInt(block.header.number, 16)};
         };
-        const typicalProof = (s = step(fx.typical.block, authAfter), stateProof: string[] = fx.typical.stateProof) =>
-            encodeGrandpaBundle({steps: [s], stateProof: stateProof.map(fromHex)});
-        const typicalAnchor = grandpaAnchor(BigInt(fx.typical.setId), authAfter, rotationNumber + 1);
+        /// A step whose votes were accumulated beforehand (empty `votes`).
+        const accStep = (block: any, authorities: Buffer, votes = Buffer.alloc(0)): GrandpaStep => {
+            const c = commit(block, authorities);
+            return {headers: [encodeHeader(block.header)], round: c.j.round, votes, ancestry: votes.length ? c.ancestry : [], authorities};
+        };
+        const bundle = (s: GrandpaStep, stateProof: string[] = fx.typical.stateProof) =>
+            encodeGrandpaPalletBundle({steps: [s], stateProof: stateProof.map(fromHex)});
         const read = (proof: Hex, anchor: Hex) =>
             pub.readContract({address: verifier, abi: art.abi, functionName: "verifyBundle", args: [proof, anchor, ctx]}) as Promise<any>;
+        const commitArg = (block: any, authorities: Buffer, setId: bigint, votes: Buffer) => {
+            const c = commit(block, authorities);
+            return {targetHash: c.targetHash, targetNumber: c.targetNumber, round: c.j.round, setId, votes: toHex(votes), ancestry: c.ancestry.map(toHex)};
+        };
+
+        /// Sends the commit's votes to the accumulator in batches; returns per-transaction gas.
+        async function accumulate(block: any, authorities: Buffer, setId: bigint, perBatch: number, label: string) {
+            const c = commit(block, authorities);
+            const gas: bigint[] = [];
+            let maxCalldata = 0;
+            for (const votes of splitVotes(c.votes, perBatch)) {
+                const args = [commitArg(block, authorities, setId, votes), toHex(authorities)];
+                const g = await txGas(acc, accArt.abi, "accumulate", args);
+                gas.push(g.gas);
+                maxCalldata = Math.max(maxCalldata, g.calldata);
+                const hash = await wallet.writeContract({address: acc, abi: accArt.abi as never, functionName: "accumulate", args: args as never, account: wallet.account!, chain: null, gas: g.gas});
+                expect((await pub.waitForTransactionReceipt({hash})).status).toBe("success");
+            }
+            const max = gas.reduce((a, b) => (a > b ? a : b), 0n);
+            checkHedera(`${label} (largest of ${gas.length} accumulate txs)`, {gas: max, calldata: maxCalldata}, {
+                signatures: c.votes.length / 102, perBatch, totalGas: gas.reduce((a, b) => a + b, 0n).toString()
+            });
+            return {gas, signatures: c.votes.length / 102};
+        }
 
         beforeAll(async () => {
+            acc = await deploy(accArt.abi, accArt.bytecode, [ed25519]);
             verifier = await deploy(art.abi, art.bytecode, [
-                ed25519, toHex(EVM_PALLET_PREFIX), fx.evmChainId, BigInt(fx.rotation.setIdBefore), keccak256(toHex(authBefore)), rotationNumber
+                ed25519, acc, toHex(pallet), fx.chainId, setBefore, keccak256(toHex(authBefore)), rotationNumber
             ]);
         });
 
-        it("derives the Frontier AccountStorages key on-chain exactly as the chain does", async () => {
-            const slot = fx.typical.realSlots[0] as Hex;
-            const onChain = await pub.readContract({address: verifier, abi: art.abi, functionName: "accountStorageKey", args: [fx.contract, slot]});
-            expect(onChain).toBe(toHex(accountStorageKey(fx.contract, slot)));
+        it("derives the pallet queue key on-chain exactly as the relay does", async () => {
+            const onChain = await pub.readContract({address: verifier, abi: art.abi, functionName: "queueKey", args: [fx.channelId]});
+            expect(onChain).toBe(toHex(palletQueueKey(pallet, fx.channelId)));
         });
 
-        it("verifies a real justification + storage proof (typical bundle)", async () => {
-            const [metadata, payloads, newAnchor, newAnchorId] = await read(typicalProof(), typicalAnchor);
+        it("a full commit inline does not fit one Hedera transaction", async () => {
+            const c = commit(fx.typical.block, authAfter);
+            const proof = bundle(accStep(fx.typical.block, authAfter, c.votes));
+            const g = await txGas(verifier, art.abi, "verifyBundle", [proof, typicalAnchor, ctx]);
+            report["chainflip inline commit (one tx)"] = {gas: g.gas.toString(), calldataBytes: g.calldata, signatures: c.votes.length / 102, fitsHedera: "no"};
+            expect(g.gas).toBeGreaterThan(HEDERA_GAS_LIMIT);
+        });
+
+        it("rejects a bundle before the accumulated weight reaches the threshold", async () => {
+            const c = commit(fx.typical.block, authAfter);
+            const first = splitVotes(c.votes, ACC_BATCH)[0];
+            const args = [commitArg(fx.typical.block, authAfter, setAfter, first), toHex(authAfter)];
+            const g = await txGas(acc, accArt.abi, "accumulate", args);
+            checkHedera("chainflip accumulate batch 1", g, {signatures: first.length / 102});
+            const hash = await wallet.writeContract({address: acc, abi: accArt.abi as never, functionName: "accumulate", args: args as never, account: wallet.account!, chain: null, gas: g.gas});
+            expect((await pub.waitForTransactionReceipt({hash})).status).toBe("success");
+            await expectRevert(read(bundle(accStep(fx.typical.block, authAfter)), typicalAnchor), "GrandpaThresholdNotMet");
+            // The same batch cannot be counted twice.
+            await expectRevert(pub.simulateContract({address: acc, abi: accArt.abi as never, functionName: "accumulate", args: args as never, account: wallet.account!}), "AlreadyCounted");
+        });
+
+        it("accumulates the rest of a real commit and verifies the bundle (typical)", async () => {
+            const c = commit(fx.typical.block, authAfter);
+            const rest = Buffer.concat(splitVotes(c.votes, ACC_BATCH).slice(1));
+            const gas: bigint[] = [];
+            for (const votes of splitVotes(rest, ACC_BATCH)) {
+                const args = [commitArg(fx.typical.block, authAfter, setAfter, votes), toHex(authAfter)];
+                const g = await txGas(acc, accArt.abi, "accumulate", args);
+                gas.push(g.gas);
+                checkHedera(`chainflip accumulate batch ${gas.length + 1}`, g, {signatures: votes.length / 102});
+                const hash = await wallet.writeContract({address: acc, abi: accArt.abi as never, functionName: "accumulate", args: args as never, account: wallet.account!, chain: null, gas: g.gas});
+                expect((await pub.waitForTransactionReceipt({hash})).status).toBe("success");
+            }
+            const [metadata, payloads, newAnchor] = await read(bundle(accStep(fx.typical.block, authAfter)), typicalAnchor);
             expect(metadata.nextMessageId).toBe(0n);
             expect(metadata.sentRunningHash).toBe("0x" + "00".repeat(32));
             expect(payloads.length).toBe(0);
             expect(newAnchor).toBe("0x");
-            expect(newAnchorId).toBe("0x");
-            const g = await txGas(verifier, art.abi, "verifyBundle", [typicalProof(), typicalAnchor, ctx]);
-            const s = step(fx.typical.block, authAfter);
-            checkHedera("bittensor typical", g, {block: parseInt(fx.typical.block.header.number, 16), signatures: s.votes.length / 102, authorities: authAfter.length / 40});
+            checkHedera("chainflip typical (verifyBundle after accumulation)", await txGas(verifier, art.abi, "verifyBundle", [bundle(accStep(fx.typical.block, authAfter)), typicalAnchor, ctx]), {
+                block: typicalNumber, signatures: c.votes.length / 102, authorities: authAfter.length / 40
+            });
         });
 
-        it("follows the real authority-set change 5 → 6 and returns the new anchor", async () => {
-            const header = encodeHeader(fx.rotation.block.header);
-            const change = grandpaScheduledChange(header)!;
-            expect(change.delay).toBe(0);
-            // The set announced in the digest is the set whose authorities signed the typical justification.
-            expect(change.authorities.equals(authAfter)).toBe(true);
-            const proof = encodeGrandpaBundle({steps: [step(fx.rotation.block, authBefore)], stateProof: fx.rotation.stateProof.map(fromHex)});
-            const anchor = grandpaAnchor(BigInt(fx.rotation.setIdBefore), authBefore, rotationNumber);
-            const [, , newAnchor, newAnchorId] = await read(proof, anchor);
-            expect(newAnchor).toBe(grandpaAnchor(BigInt(fx.typical.setId), authAfter, rotationNumber + 1));
-            expect(newAnchorId).toBe("0x" + BigInt(fx.typical.setId).toString(16).padStart(16, "0"));
-            checkHedera("bittensor rotation (set 5→6)", await txGas(verifier, art.abi, "verifyBundle", [proof, anchor, ctx]), {block: rotationNumber});
-        });
-
-        it("proves real non-zero EVM storage slots through the trie", async () => {
-            const stateRoot = toHex(decodeHeader(encodeHeader(fx.typical.block.header)).stateRoot);
-            for (const slot of fx.typical.realSlots as Hex[]) {
-                const [exists, value] = (await pub.readContract({
-                    address: harness, abi: harnessArt.abi, functionName: "get",
-                    args: [stateRoot, fx.typical.stateProof, toHex(accountStorageKey(fx.contract, slot))]
-                })) as [boolean, Hex];
+        it("proves real Chainflip storage items under the same finality (verifyStorageEntry)", async () => {
+            const proof = encodeGrandpaEntryProof({steps: [accStep(fx.typical.block, authAfter)], stateProof: fx.typical.stateProof.map(fromHex)});
+            for (let i = 0; i < fx.typical.realKeys.length; i++) {
+                const [exists, value, number] = (await pub.readContract({
+                    address: verifier, abi: art.abi, functionName: "verifyStorageEntry", args: [proof, typicalAnchor, fx.typical.realKeys[i]]
+                })) as [boolean, Hex, number];
                 expect(exists).toBe(true);
-                expect(bytes(value)).toBe(32);
+                expect(value).toBe(fx.typical.realValues[i]);
+                expect(number).toBe(typicalNumber);
             }
+            // Grandpa::CurrentSetId at the justified block is the anchor's set id.
+            expect(fromHex(fx.typical.realValues[0]).readBigUInt64LE()).toBe(setAfter);
+            const [exists] = (await pub.readContract({
+                address: verifier, abi: art.abi, functionName: "verifyStorageEntry", args: [proof, typicalAnchor, toHex(palletServiceKey(pallet))]
+            })) as [boolean];
+            expect(exists).toBe(false);
         });
 
-        it("rejects a tampered signature", async () => {
-            const s = step(fx.typical.block, authAfter);
-            s.votes[38 + 5] ^= 1;
-            await expectRevert(read(typicalProof(s), typicalAnchor), "InvalidGrandpaSignature");
+        it("follows the real authority-set change with an accumulated commit of the old set", async () => {
+            const change = grandpaScheduledChange(encodeHeader(fx.rotation.block.header))!;
+            expect(change.delay).toBe(0);
+            expect(change.authorities.equals(authAfter)).toBe(true);
+            await accumulate(fx.rotation.block, authBefore, setBefore, ACC_BATCH, `chainflip rotation (set ${setBefore}→${setAfter})`);
+            const proof = bundle(accStep(fx.rotation.block, authBefore), fx.rotation.stateProof);
+            const anchor = grandpaAnchor(setBefore, authBefore, rotationNumber);
+            const [metadata, , newAnchor, newAnchorId] = await read(proof, anchor);
+            expect(metadata.nextMessageId).toBe(0n);
+            expect(newAnchor).toBe(grandpaAnchor(setAfter, authAfter, rotationNumber + 1));
+            expect(newAnchorId).toBe("0x" + setAfter.toString(16).padStart(16, "0"));
+            checkHedera(`chainflip rotation verifyBundle (set ${setBefore}→${setAfter})`, await txGas(verifier, art.abi, "verifyBundle", [proof, anchor, ctx]), {block: rotationNumber});
         });
 
-        it("rejects a commit below threshold", async () => {
-            const s = step(fx.typical.block, authAfter);
-            s.votes = s.votes.subarray(0, s.votes.length - 102);
-            await expectRevert(read(typicalProof(s), typicalAnchor), "GrandpaThresholdNotMet");
+        it("rejects a tampered signature in an accumulator batch", async () => {
+            const c = commit(fx.typical.block, authAfter);
+            const votes = Buffer.from(splitVotes(c.votes, 1)[0]);
+            votes[38 + 5] ^= 1;
+            const args = [commitArg(fx.typical.block, authAfter, setAfter + 7n, votes), toHex(authAfter)];
+            await expectRevert(pub.simulateContract({address: acc, abi: accArt.abi as never, functionName: "accumulate", args: args as never, account: wallet.account!}), "InvalidGrandpaSignature");
         });
 
-        it("rejects the wrong authority set (old set's anchor)", async () => {
-            await expectRevert(read(typicalProof(), grandpaAnchor(BigInt(fx.rotation.setIdBefore), authBefore, rotationNumber)), "AuthoritySetMismatch");
+        it("rejects the accumulated record under another set id (signatures bind set_id)", async () => {
+            await expectRevert(read(bundle(accStep(fx.typical.block, authAfter)), grandpaAnchor(setAfter + 1n, authAfter, rotationNumber + 1)), "GrandpaThresholdNotMet");
         });
 
-        it("rejects a replayed old set id (signatures bind set_id)", async () => {
-            await expectRevert(read(typicalProof(), grandpaAnchor(BigInt(fx.typical.setId) + 1n, authAfter, rotationNumber + 1)), "InvalidGrandpaSignature");
+        it("rejects the wrong authority set", async () => {
+            const wrong = Buffer.from(authAfter);
+            wrong[0] ^= 1;
+            await expectRevert(read(bundle(accStep(fx.typical.block, authAfter)), grandpaAnchor(setAfter, wrong, rotationNumber + 1)), "AuthoritySetMismatch");
         });
 
         it("rejects a block below the anchor height (stale)", async () => {
-            await expectRevert(read(typicalProof(), grandpaAnchor(BigInt(fx.typical.setId), authAfter, parseInt(fx.typical.block.header.number, 16) + 1)), "HeightTooOld");
+            await expectRevert(read(bundle(accStep(fx.typical.block, authAfter)), grandpaAnchor(setAfter, authAfter, typicalNumber + 1)), "HeightTooOld");
         });
 
         it("rejects a storage proof with a node missing", async () => {
-            // Drop the trie root node: no slot can be read (present or absent) without it.
             const root = decodeHeader(encodeHeader(fx.typical.block.header)).stateRoot;
             const pruned = (fx.typical.stateProof as string[]).filter((n) => !blake2_256(fromHex(n)).equals(root));
             expect(pruned.length).toBe(fx.typical.stateProof.length - 1);
-            await expectRevert(read(typicalProof(undefined, pruned), typicalAnchor), "MissingProofNode");
+            await expectRevert(read(bundle(accStep(fx.typical.block, authAfter), pruned), typicalAnchor), "MissingProofNode");
         });
     });
 
