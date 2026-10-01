@@ -26,16 +26,16 @@ import {deriveChannelSlots} from "./buildEthMainnetProof.js";
 ///     (absent there → MPT exclusion proofs → zeroed queue metadata, as in the Sepolia live test).
 ///
 /// CLI:
-///   npx tsx test/e2e/relay/buildBscLiveProof.ts [--network chapel|mainnet] [--vectors] summary from fixture
+///   npx tsx test/e2e/relay/buildBscLiveProof.ts [--network chapel|mainnet|botchain] [--vectors] summary from fixture
 ///                                                     (--vectors rewrites the Foundry hex vectors)
-///   npx tsx test/e2e/relay/buildBscLiveProof.ts --refresh [--network chapel|mainnet]  re-capture
+///   npx tsx test/e2e/relay/buildBscLiveProof.ts --refresh [--network chapel|mainnet|botchain]  re-capture
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const BSC_LIVE_DIR = path.resolve(__dirname, "../fixtures/bsc-live");
 
-export type BscNetwork = "chapel" | "mainnet";
+export type BscNetwork = "chapel" | "mainnet" | "botchain";
 
-export const NETWORKS: Record<BscNetwork, {chainId: bigint; rpcs: string[]; account: Hex}> = {
+export const NETWORKS: Record<BscNetwork, {chainId: bigint; rpcs: string[]; account: Hex; epochLength: bigint; lag?: number}> = {
     chapel: {
         chainId: 97n,
         rpcs: [
@@ -44,17 +44,27 @@ export const NETWORKS: Record<BscNetwork, {chainId: bigint; rpcs: string[]; acco
             "https://data-seed-prebsc-1-s1.bnbchain.org:8545",
             "https://data-seed-prebsc-2-s1.bnbchain.org:8545"
         ],
-        account: "0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd" // WBNB (Chapel)
+        account: "0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd", // WBNB (Chapel)
+        epochLength: 1000n
     },
     mainnet: {
         chainId: 56n,
         rpcs: ["https://bsc-rpc.publicnode.com", "https://bsc.drpc.org", "https://bsc-dataseed.bnbchain.org"],
-        account: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" // WBNB (mainnet)
+        account: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", // WBNB (mainnet)
+        epochLength: 1000n
+    },
+    // BOT Chain (BSC-derived Geth v1.5.x, Parlia + fast finality). Only one public RPC exists; it
+    // serves eth_getProof with deep history. Probe account: the ValidatorSet system contract.
+    botchain: {
+        chainId: 677n,
+        rpcs: ["https://rpc.botchain.ai"],
+        account: "0x0000000000000000000000000000000000001000",
+        epochLength: 1000n
     }
 };
 
 export const LIVE_CHANNEL_ID: Hex = keccak256(toHex("clpr/bsc-parlia-verifier/live"));
-export const EPOCH_LENGTH = 1000n; // Maxwell (BEP-524) epoch length on mainnet and Chapel
+export const EPOCH_LENGTH = 1000n; // Maxwell (BEP-524) epoch length on mainnet and Chapel (default)
 
 // ── Parlia constants (mirror ClprParlia.sol / bsc consensus/parlia) ─────────
 const EXTRA_VANITY = 32;
@@ -505,10 +515,10 @@ function stripBlock(b: RpcBlock & Record<string, unknown>): RpcBlock {
 /// Find a header in (from, to] carrying an attestation with `target = source + 1` and
 /// `source ≥ minSource`; returns the carrier and the chain [minSource … source].
 async function findFinalizing(
-    get: (n: bigint) => Promise<RpcBlock>, minSource: bigint, maxTarget: bigint, limit = 12
+    get: (n: bigint) => Promise<RpcBlock>, minSource: bigint, maxTarget: bigint, epochLength: bigint, limit = 12
 ): Promise<{carrier: bigint; chain: bigint[]}> {
     for (let k = minSource + 2n; k <= minSource + BigInt(limit); k++) {
-        const a = headerAttestation(await get(k));
+        const a = headerAttestation(await get(k), epochLength);
         if (!a || a.targetNumber !== a.sourceNumber + 1n || a.sourceNumber < minSource || a.targetNumber > maxTarget) continue;
         const chain: bigint[] = [];
         for (let n = minSource; n <= a.sourceNumber; n++) chain.push(n);
@@ -521,7 +531,7 @@ export async function captureBscLive(network: BscNetwork, opts: {account?: Hex; 
     const net = NETWORKS[network];
     const rpcs = opts.rpcs ?? net.rpcs;
     const account = (opts.account ?? net.account).toLowerCase() as Hex;
-    const L = EPOCH_LENGTH;
+    const L = net.epochLength;
     const chainId = BigInt(await anyRpc<Hex>(rpcs, "eth_chainId", []));
     if (chainId !== net.chainId) throw new Error(`unexpected chainId ${chainId}`);
 
@@ -538,7 +548,7 @@ export async function captureBscLive(network: BscNetwork, opts: {account?: Hex; 
         const latest = BigInt((await anyRpc<RpcBlock>(rpcs, "eth_getBlockByNumber", ["latest", false])).number);
         // Some public nodes sit a few dozen blocks behind the load-balanced head and refuse eth_getProof
         // for blocks they have not reached yet; a state block ~1 minute old is served reliably.
-        const S = latest - BigInt(opts.lag ?? 120);
+        const S = latest - BigInt(opts.lag ?? net.lag ?? 120);
         const eCur = S - (S % L);
         const ePrev = eCur - L;
         const ePP = ePrev - L;
@@ -552,8 +562,8 @@ export async function captureBscLive(network: BscNetwork, opts: {account?: Hex; 
         void setPP;
         const lastTargetPrev = eCur + checkLen(setPrev.addrs.length, setPrev.turnLength);
         const lastTargetCur = eCur + L + checkLen(setCur.addrs.length, setCur.turnLength);
-        const rot = await findFinalizing(get, eCur, lastTargetPrev);
-        const st = await findFinalizing(get, S, lastTargetCur);
+        const rot = await findFinalizing(get, eCur, lastTargetPrev, L);
+        const st = await findFinalizing(get, S, lastTargetCur, L);
         for (const n of [...rot.chain, ...st.chain]) await get(n);
 
         const slots = deriveChannelSlots(LIVE_CHANNEL_ID);
@@ -642,7 +652,7 @@ function summarize(p: BscLiveProof): string {
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
     const nIdx = args.indexOf("--network");
-    const networks: BscNetwork[] = nIdx >= 0 ? [args[nIdx + 1] as BscNetwork] : ["chapel", "mainnet"];
+    const networks: BscNetwork[] = nIdx >= 0 ? [args[nIdx + 1] as BscNetwork] : ["chapel", "mainnet", "botchain"];
     for (const network of networks) {
         let capture: BscLiveCapture;
         if (args.includes("--refresh")) {

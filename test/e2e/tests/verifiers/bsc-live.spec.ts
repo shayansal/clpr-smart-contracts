@@ -17,6 +17,7 @@ import {
     encodeBundle,
     headerAttestation,
     loadBscCapture,
+    NETWORKS,
     type BscLiveCapture,
     type BscLiveProof,
     type BscNetwork
@@ -24,7 +25,7 @@ import {
 import {bigintToTrimmedBuf, hexToBuf} from "../../lib/rlp.js";
 
 /// BscParliaVerifier against REAL BNB Smart Chain data, replayed offline on anvil from
-/// test/e2e/fixtures/bsc-live/{chapel,mainnet}.json (re-capture: `npm run bsc-live:refresh`).
+/// test/e2e/fixtures/bsc-live/{chapel,mainnet,botchain}.json (re-capture: `npm run bsc-live:refresh`).
 ///
 /// Per network the fixture holds three consecutive epoch blocks, the real vote attestations that
 /// finalize the newest epoch block and a recent state block, and `eth_getProof` at that block. The
@@ -90,7 +91,7 @@ describe("BscParliaVerifier on live BSC data (fixture replay)", () => {
         anvil?.kill("SIGTERM");
     });
 
-    for (const network of ["chapel", "mainnet"] as BscNetwork[]) {
+    for (const network of ["chapel", "mainnet", "botchain"] as BscNetwork[]) {
         describe(network, () => {
             let capture: BscLiveCapture;
             let live: BscLiveProof;
@@ -101,13 +102,13 @@ describe("BscParliaVerifier on live BSC data (fixture replay)", () => {
             });
 
             it("builder: real headers hash, seals recover validators, BLS attestations verify off-chain", () => {
-                expect(live.chainId).toBe(network === "chapel" ? 97n : 56n);
-                expect(live.meta.rotationEpoch).toBe(live.meta.anchorEpoch + 1000n);
+                expect(live.chainId).toBe(NETWORKS[network].chainId);
+                expect(live.meta.rotationEpoch).toBe(live.meta.anchorEpoch + NETWORKS[network].epochLength);
                 expect(3 * live.meta.rotationVotes).toBeGreaterThanOrEqual(2 * live.meta.validators);
                 expect(3 * live.meta.stateVotes).toBeGreaterThanOrEqual(2 * live.meta.validators);
                 // The attestation the bundle uses is the one carried in a real header's extraData.
                 const carrier = capture.blocks[String(capture.state.carrier)];
-                const att = headerAttestation(carrier)!;
+                const att = headerAttestation(carrier, NETWORKS[network].epochLength)!;
                 expect(att.targetNumber).toBe(att.sourceNumber + 1n);
             });
 

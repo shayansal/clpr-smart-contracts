@@ -7,8 +7,8 @@ import {ClprParlia} from "@hiero-ledger/clpr/libraries/proof/parlia/ClprParlia.s
 import {ClprEvmBundleVerifier} from "@hiero-ledger/clpr/verifiers/evm/common/ClprEvmBundleVerifier.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 
-/// @dev BscParliaVerifier on REAL chain data: BSC testnet (Chapel, 9 validators) and BSC mainnet
-///      (21 validators), recorded by `npm run bsc-live:refresh` into test/e2e/fixtures/bsc-live/.
+/// @dev BscParliaVerifier on REAL chain data: BSC testnet (Chapel, 9 validators), BSC mainnet
+///      (21 validators) and BOT Chain (7 validators), recorded by `npm run bsc-live:refresh` into test/e2e/fixtures/bsc-live/.
 ///      Each vector set covers verifyConfig on a real epoch block, a real epoch rotation (the next
 ///      epoch block finalized by the outgoing set's BLS attestation, with a changed validator set) and
 ///      a real finalized state header with its account/storage MPT proofs.
@@ -80,6 +80,11 @@ contract BscParliaLiveTest is Test {
 
     function test_live_mainnet() public {
         _checkNetwork("mainnet", "eip155:56");
+    }
+
+    /// BOT Chain mainnet (chainId 677, 7 validators, turnLength 16, 1000-block epochs).
+    function test_live_botchain() public {
+        _checkNetwork("botchain", "eip155:677");
     }
 
     // ── Negative cases on real data ───────────────────────────────────────────
