@@ -679,13 +679,14 @@ async function stageNext(chain: OpStackLiveChain, count: number): Promise<void> 
         if (type === respected) blocks.push(await call<bigint>(l1Rpc, addr, "l2SequenceNumber", [], "latest"));
     }
     const interval = blocks[0] - blocks[1];
-    const head = BigInt(await rpc<Hex>(chain.l2LatestProofRpcs[0], "eth_blockNumber", []));
+    const head = BigInt(await rpc<Hex>(chain.l2Rpcs[0], "eth_blockNumber", []));
     let target = blocks[0] + interval;
     while (target <= head + 5n) target += interval;
     mkdirSync(pendingDir(chain), {recursive: true});
     for (let k = 0; k < count; k++, target += interval) {
         console.error(`staging L2 block ${target} (game interval ${interval}, head ${head})`);
-        const staged = await stageLatestL2Proof(chain.l2LatestProofRpcs[0], L2_ACCOUNT, deriveChannelSlots(chain.channelId), target);
+        const staged = await stageLatestL2Proof(chain.l2LatestProofRpcs[0], L2_ACCOUNT, deriveChannelSlots(chain.channelId),
+            target, {headerRpc: chain.l2Rpcs[0]});
         if (!staged) {
             console.error(`missed block ${target}`);
             continue;
