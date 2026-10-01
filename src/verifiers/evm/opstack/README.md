@@ -21,7 +21,7 @@ the sibling output-oracle verifiers (`src/verifiers/evm/opstack/oracle/` on `fea
 
 | | |
 |---|---|
-| Chains covered | Base `eip155:8453`, OP Mainnet `eip155:10`, Ink `eip155:57073`, Unichain `eip155:130`, Celo `eip155:42220`, World Chain `eip155:480`, Soneium `eip155:1868`, X Layer `eip155:196`; live data also from Base Sepolia `eip155:84532` |
+| Chains covered | Base `eip155:8453`, OP Mainnet `eip155:10`, Ink `eip155:57073`, Unichain `eip155:130`, Celo `eip155:42220`, World Chain `eip155:480`, Soneium `eip155:1868`, X Layer `eip155:196`, RISE `eip155:4153`, Ronin `eip155:2020`, BOB `eip155:60808`, MegaETH `eip155:4326`; live data also from Base Sepolia `eip155:84532` |
 | Finality source | Ethereum sync committee (≥ 342 of 512) over the attested L1 header, then the L2's ASR and dispute games at that L1 state |
 | Trust assumptions | FINALIZED: the sync committee, the L2 fault-proof system and its upgrade keys. PROPOSED: also the proposer. Permissioned chains (World Chain, Soneium, X Layer) also trust their proposer and challenger. |
 | Typical bundle | PROPOSED `verifyBundle` on Base Sepolia: 3,910,935 gas, 46,084 B calldata (493/512). FINALIZED full bundle not yet measured on live data. |
@@ -257,11 +257,16 @@ Values read from Sourcify, Blockscout and live L1 storage on 2026-10-01:
 | Base | AggregateVerifier 0.2.0 (621), ASR 3.7.0, delay 0 | `OUTPUT_ROOT` | Same layout as Base Sepolia |
 | OP Mainnet | SuperFaultDisputeGame (9), permissionless, delay 3.5 d | `SUPER_ROOT_V1` | Layout, clone format and `keccak256(0x01 ‖ ts ‖ 10 ‖ outputRoot) == rootClaim` checked on live mainnet games |
 | Ink | SuperFaultDisputeGame (9) | `SUPER_ROOT_V1` | |
-| Unichain | SuperFaultDisputeGame (9) | `SUPER_ROOT_V1` | |
+| Unichain | SuperFaultDisputeGame (9) | `SUPER_ROOT_V1` | live-verified to the L2 state root; [chain page](../../../../docs/chains/unichain.md) |
 | World Chain | PermissionedDisputeGame (1) | `OUTPUT_ROOT` | Permissioned proposer and challenger |
 | Soneium | SuperPermissionedDisputeGame (5) | `SUPER_ROOT_V1` | Permissioned |
 | Celo | OPSuccinctFaultDisputeGame, OP Succinct Lite (42) | `OUTPUT_ROOT` | Trusts SP1 |
 | X Layer | OPSuccinctFaultDisputeGame 2.0.0 (42), ASR 3.5.0, DGF 1.3.0, delay 3.5 d (302,400 s) | `OUTPUT_ROOT` | Full profile pinned in [`profiles/XLayerProfile.sol`](./profiles/XLayerProfile.sol) and `XLAYER_MAINNET_PROFILE` in `test/e2e/relay/opstack.ts`; live-verified |
+| RISE | OPSuccinctFaultDisputeGame (42), ASR 3.5.0 | `OUTPUT_ROOT` | Permissioned challengers, 1-day window; live-verified to the L2 state root |
+| Ronin | PermissionedDisputeGame 2.4.0 (1), ASR 3.9.0 | `OUTPUT_ROOT` | One permissioned proposer and challenger; live-verified to the L2 state root |
+| BOB | PermissionedDisputeGame 2.4.0 (1), ASR 3.9.0, delay 12 h | `OUTPUT_ROOT` | One permissioned proposer; live-verified full FINALIZED bundle |
+| MegaETH | KailuaGame 0.1.0 (1337), OptimismPortal2 3.15.2 as registry | `OUTPUT_ROOT` | No anchor contract (ANCHOR mode rejected by design); live-verified to the L2 state root |
+| Rollux | L2OutputOracle 1.3.1 on Syscoin NEVM | — | Blocked: no Syscoin verifier |
 
 Only Base Sepolia and X Layer have pinned, live-checked profiles. For the other chains, read the ASR
 address, implementation code hash and game implementation at deployment with the same probe
