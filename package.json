@@ -44,7 +44,9 @@
     "e2e:down:solo:besu": "node --experimental-strip-types test/e2e/backend/infra.ts down solo:besu",
     "e2e:besu:status": "node --experimental-strip-types test/e2e/backend/infra.ts status besu",
     "verify:establish-channel": "tsx test/verification-inputs/establish-channel.ts",
-    "verify:proof": "tsx test/verification-inputs/proof-verification.ts"
+    "verify:proof": "tsx test/verification-inputs/proof-verification.ts",
+    "test:e2e:cardano-live": "vitest run test/e2e/tests/verifiers/cardano-live.spec.ts",
+    "cardano-live:refresh": "tsx test/e2e/relay/buildCardanoLiveProof.ts --refresh"
   },
   "dependencies": {
     "@ethereumjs/rlp": "^10.1.2",
