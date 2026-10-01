@@ -54,6 +54,17 @@ export const SUPER_FAULT_DISPUTE_GAME_LAYOUT: OpStackLayout = {
     gameWasRespectedOffset: 0n
 };
 
+/// ASR 3.5.0 / DGF 1.3.0 / OPSuccinctFaultDisputeGame 2.0.0 (OP Succinct Lite, game type 42: X Layer,
+/// Celo). Read from the Sourcify storage layouts of X Layer's ASR implementation 0xeb69…cf2e, DGF
+/// implementation 0x74fa…7d50 and game implementation 0x8841…e607, and cross-checked against live
+/// mainnet storage: same ASR/DGF slots; the game packs createdAt | resolvedAt | status in slot 0 and
+/// keeps `wasRespectedGameTypeWhenCreated` at slot 9, offset 0.
+export const OP_SUCCINCT_LITE_LAYOUT: OpStackLayout = {
+    ...BASE_SEPOLIA_LAYOUT,
+    gameWasRespectedSlot: 9n,
+    gameWasRespectedOffset: 0n
+};
+
 /// `OpStackOutputRootProof.RootFormat`.
 export const ROOT_FORMAT = {OUTPUT_ROOT: 0, SUPER_ROOT_V1: 1} as const;
 
@@ -66,6 +77,21 @@ export interface OpStackProfile {
     gameImplementation: Hex;
     layout: OpStackLayout;
 }
+
+/// X Layer (chain 196) deployment profile, read from Ethereum mainnet on 2026-10-01:
+///   OptimismPortal 0x6405…9993 (5.2.0) → ASR 0x0005…149d (proxy, 3.5.0; implementation 0xeb69…cf2e)
+///   → DGF 0x9D4c…f675 (1.3.0) → gameImpls[42] = OPSuccinctFaultDisputeGame 2.0.0 0x8841…e607.
+/// The finality delay (302,400 s = 3.5 days) is an immutable of the ASR implementation, bound by its
+/// code hash. Re-read at deployment; the live builder checks every field against the chain.
+export const XLAYER_MAINNET_PROFILE: OpStackProfile = {
+    rootFormat: 0, // ROOT_FORMAT.OUTPUT_ROOT
+    l2ChainId: 196n,
+    anchorStateRegistry: "0x000590BB65ab1864a7AD46d6B957cC9a4F2C149d",
+    anchorStateRegistryImplCodeHash: "0x1194081c631cd5141ef68135c5aaaa59b92a7c2df303a713c3cf81c6bab69348",
+    disputeGameFinalityDelaySeconds: 302_400n,
+    gameImplementation: "0x8841FA06099FEdfE7DB6962926C6A281e9E1e607",
+    layout: OP_SUCCINCT_LITE_LAYOUT
+};
 
 export const EIP1967_IMPLEMENTATION_SLOT: Hex = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
