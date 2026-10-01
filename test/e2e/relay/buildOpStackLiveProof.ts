@@ -26,6 +26,7 @@ import {
     OP_SUCCINCT_LITE_LAYOUT,
     outputRootPreimage,
     PERMISSIONED_DISPUTE_GAME_V2_LAYOUT,
+    SUPER_FAULT_DISPUTE_GAME_LAYOUT,
     ROOT_FORMAT,
     superRootPreimage,
     slotHex,
@@ -178,8 +179,21 @@ export const BOB = mainnetChain("bob", {
     layout: PERMISSIONED_DISPUTE_GAME_V2_LAYOUT
 });
 
+/// Unichain (chain 130): SuperFaultDisputeGame 0.8.0 (type 9, super roots), ASR 3.9.0 / DGF 1.6.1 with game
+/// args, no anchor game (starting anchor root). Games claim an L2 timestamp; blocks are 1 s apart.
+export const UNICHAIN = mainnetChain("unichain", {
+    l2ChainId: 130,
+    optimismPortal: "0x0bd48f6B86a26D3a217d0Fa6FfE2B491B956A7a2",
+    anchorStateRegistry: "0x27Cf508E4E3Aa8d30b3226aC3b5Ea0e8bcaCAFF9",
+    l2Rpcs: ["https://mainnet.unichain.org", "https://unichain-rpc.publicnode.com"],
+    l2LatestProofRpcs: [],
+    layout: SUPER_FAULT_DISPUTE_GAME_LAYOUT,
+    rootFormat: ROOT_FORMAT.SUPER_ROOT_V1,
+    l2BlockTimeSeconds: 1n
+});
+
 export const OPSTACK_LIVE_CHAINS: Record<string, OpStackLiveChain> = Object.fromEntries(
-    [BASE_SEPOLIA, XLAYER, RISE, RONIN, BOB].map((c) => [c.name, c]));
+    [BASE_SEPOLIA, XLAYER, RISE, RONIN, BOB, UNICHAIN].map((c) => [c.name, c]));
 
 /// L2ToL1MessagePasser predeploy: a real contract with real code and storage on every OP Stack chain.
 export const L2_ACCOUNT: Hex = "0x4200000000000000000000000000000000000016";
@@ -396,7 +410,15 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
         }
         const newest = recent[0];
         if (!newest) throw new Error("no game of the respected type");
-        const resolved = recent.find((g) => statusOf(L, g.proof) === GAME_STATUS.DEFENDER_WINS);
+        let resolved = recent.find((g) => statusOf(L, g.proof) === GAME_STATUS.DEFENDER_WINS);
+        // Chains whose game clock spans more than 64 games (Unichain: ~1 game/h, 3.5-day clocks): look
+        // further back through the games' state slot alone.
+        for (let i = count - 65n; !resolved && i >= 0n && i >= count - 400n; i--) {
+            const [type, , addr] = await call<[number, bigint, Hex]>(l1Rpc, dgf, "gameAtIndex", [i], B);
+            if (type !== respectedGameType) continue;
+            const word = BigInt(await rpc<Hex>(l1Rpc, "eth_getStorageAt", [addr, slotHex(L.gameStateSlot), B]));
+            if (Number((word >> (L.gameStatusOffset * 8n)) & 0xffn) === GAME_STATUS.DEFENDER_WINS) resolved = await readGame(addr);
+        }
         const anchor = BigInt(anchorGame) === 0n ? null : await readGame(anchorGame);
         const startingAnchor = anchor ? undefined : await call<[Hex, bigint]>(l1Rpc, asr, "getAnchorRoot", [], B)
             .then(([root, seq]) => ({root, l2BlockNumber: seq.toString()}));

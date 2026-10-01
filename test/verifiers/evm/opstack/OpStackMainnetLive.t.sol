@@ -7,6 +7,7 @@ import {OpStackProposedVerifier} from "@hiero-ledger/clpr/verifiers/evm/opstack/
 import {RiseProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/RiseProfile.sol";
 import {RoninProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/RoninProfile.sol";
 import {BobProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/BobProfile.sol";
+import {UnichainProfile} from "@hiero-ledger/clpr/verifiers/evm/opstack/profiles/UnichainProfile.sol";
 import {EthL1StateVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/EthL1StateVerifier.sol";
 import {ClprBeaconSsz} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconSsz.sol";
 import {OpStackOutputRootProof as OP} from "@hiero-ledger/clpr/libraries/proof/opstack/OpStackOutputRootProof.sol";
@@ -279,5 +280,19 @@ contract OpStackBobLiveTest is OpStackMainnetLiveBase {
 
     function _gameType() internal pure override returns (uint32) {
         return BobProfile.GAME_TYPE;
+    }
+}
+
+contract OpStackUnichainLiveTest is OpStackMainnetLiveBase {
+    function _fixtureName() internal pure override returns (string memory) {
+        return "unichain";
+    }
+
+    function _profile() internal pure override returns (OP.Profile memory) {
+        return UnichainProfile.profile();
+    }
+
+    function _gameType() internal pure override returns (uint32) {
+        return UnichainProfile.GAME_TYPE;
     }
 }
