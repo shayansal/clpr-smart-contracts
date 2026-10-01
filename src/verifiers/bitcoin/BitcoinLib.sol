@@ -3,7 +3,8 @@ pragma solidity ^0.8.28;
 
 /// @title BitcoinLib
 /// @notice Pure/view helpers for verifying Bitcoin L1 data on an EVM: 80-byte block headers,
-///         compact difficulty ("nBits") encoding, the mainnet 2016-block retarget rule, chainwork,
+///         compact difficulty ("nBits") encoding, the mainnet 2016-block retarget rule, the Bitcoin
+///         Cash ASERT rule, chainwork,
 ///         transaction Merkle branches, and transaction parsing (legacy and BIP-144 segwit).
 ///
 /// @dev Byte-order convention: every 32-byte hash handled here is in Bitcoin's INTERNAL byte order
@@ -198,6 +199,71 @@ library BitcoinLib {
     /// @dev Expected work of a block at `target` (Bitcoin Core `GetBlockProof`): 2^256 / (target+1).
     function work(uint256 target) internal pure returns (uint256) {
         return (~target / (target + 1)) + 1;
+    }
+
+    // ── ASERT (Bitcoin Cash aserti3-2d) ───────────────────────────────────────
+
+    /// @dev Bitcoin Cash ASERT target (Bitcoin Cash Node `pow.cpp` `CalculateASERT`):
+    ///      `refTarget * 2^((timeDiff - spacing * (heightDiff + 1)) / halfLife)` in 16.16 fixed point,
+    ///      with the cubic approximation of 2^x, clamped to [1, powLimit].
+    /// @param refTarget Target of the ASERT anchor block (0 < refTarget ≤ powLimit < 2^224).
+    /// @param timeDiff Parent block's time minus the time of the anchor block's parent, in seconds.
+    /// @param heightDiff Parent block's height minus the anchor block's height.
+    /// @param halfLife Seconds ahead of (behind) schedule that double (halve) the target.
+    function asertTarget(uint256 refTarget, int256 timeDiff, uint256 heightDiff, uint256 powLimit, uint256 halfLife)
+        internal
+        pure
+        returns (uint256 next)
+    {
+        // C++ integer division truncates toward zero, as Solidity's signed division does.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int256 exponent = ((timeDiff - int256(TARGET_SPACING * (heightDiff + 1))) * 65536) / int256(halfLife);
+        // Arithmetic shift: floor, as in the reference.
+        int256 shifts = exponent >> 16;
+        // casting to 'uint256' is safe: exponent - shifts * 65536 is in [0, 65535].
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint256 frac = uint256(exponent - shifts * 65536);
+        // The reference computes this sum in uint64; its maximum (frac = 65535) is below 2^64.
+        uint256 factor =
+            65536 + ((195766423245049 * frac + 971821376 * frac * frac + 5127 * frac * frac * frac + (1 << 47)) >> 48);
+        next = refTarget * factor; // < 2^241 since refTarget < 2^224
+        shifts -= 16;
+        if (shifts <= 0) {
+            // casting to 'uint256' is safe: -shifts ≥ 0.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            next >>= uint256(-shifts);
+        } else {
+            // casting to 'uint256' is safe: shifts > 0.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint256 l = uint256(shifts);
+            uint256 shifted = next << l;
+            // Bits shifted out: the real value is ≥ 2^256, which clamps to powLimit anyway.
+            next = (shifted >> l) != next ? powLimit : shifted;
+        }
+        if (next == 0) next = 1;
+        else if (next > powLimit) next = powLimit;
+    }
+
+    /// @dev Compact nBits a Bitcoin Cash block must carry (BCHN `GetNextASERTWorkRequired`).
+    /// @param anchorBits nBits of the ASERT anchor block.
+    /// @param anchorParentTime Timestamp of the anchor block's parent.
+    /// @param anchorHeight Height of the anchor block.
+    /// @param parentHeight Height of the new block's parent (≥ anchorHeight).
+    /// @param parentTime Timestamp of the new block's parent.
+    function asertBits(
+        uint32 anchorBits,
+        uint32 anchorParentTime,
+        uint32 anchorHeight,
+        uint256 parentHeight,
+        uint32 parentTime,
+        uint256 powLimit,
+        uint256 halfLife
+    ) internal pure returns (uint32) {
+        int256 timeDiff = int256(uint256(parentTime)) - int256(uint256(anchorParentTime));
+        return
+            targetToBits(
+                asertTarget(bitsToTarget(anchorBits), timeDiff, parentHeight - anchorHeight, powLimit, halfLife)
+            );
     }
 
     // ── Merkle ────────────────────────────────────────────────────────────────

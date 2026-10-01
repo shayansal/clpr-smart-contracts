@@ -385,9 +385,10 @@ contract BitcoinVerifier is IClprVerifier {
     }
 
     /// @dev Difficulty and proof-of-work checks for the block at `height` whose parent state is `s`;
-    ///      advances `s` (bits, time, period start, chainwork) to this block.
+    ///      advances `s` (bits, time, period start, chainwork) to this block. `s.height` is the
+    ///      parent's height. Overridden by {BitcoinCashVerifier} for the ASERT difficulty rule.
     ///      Not checked (documented in the README): median-time-past and the 2-hour future-time rule.
-    function _checkWork(bytes memory header, bytes32 hash, uint256 height, Checkpoint memory s) internal view {
+    function _checkWork(bytes memory header, bytes32 hash, uint256 height, Checkpoint memory s) internal view virtual {
         uint32 bits = BitcoinLib.nBits(header);
         uint32 time = BitcoinLib.timestamp(header);
         bool boundary = height % BitcoinLib.RETARGET_INTERVAL == 0;
