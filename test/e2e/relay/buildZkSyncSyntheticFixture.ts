@@ -1,4 +1,5 @@
 import {spawn, type ChildProcess} from "node:child_process";
+import {createHash} from "node:crypto";
 import {mkdirSync, writeFileSync} from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
@@ -177,8 +178,15 @@ function encodeLegacy(b: StoredBatchInfo): Hex {
 export async function buildZkSyncSyntheticFixture(port = Number(process.env.CLPR_ANVIL_PORT_A ?? 8741)) {
     const older: ChannelState = {status: 1n, nextMessageId: 3n, receivedMessageId: 2n,
         sent: keccak256(toHex("sent v1")), received: keccak256(toHex("received v1")), manifestVersion: 1n};
+    // The current bundle carries two payloads; sentRunningHash chains them from zero
+    // (sha256(prev ‖ sha256(payload)), the CLPR running hash).
+    const payloads = [Buffer.from("clpr payload one"), Buffer.from("clpr payload two")];
+    const sha = (...b: Buffer[]) => createHash("sha256").update(Buffer.concat(b)).digest();
+    let running = Buffer.alloc(32);
+    for (const pl of payloads) running = sha(running, sha(pl));
+    const bundleContent = ("0x" + Buffer.concat(payloads.map((pl) => pbBytes(2, pl))).toString("hex")) as Hex;
     const current: ChannelState = {status: 1n, nextMessageId: 5n, receivedMessageId: 4n,
-        sent: keccak256(toHex("sent v2")), received: keccak256(toHex("received v2")), manifestVersion: 2n};
+        sent: ("0x" + running.toString("hex")) as Hex, received: keccak256(toHex("received v2")), manifestVersion: 2n};
     const manifest = manifestPreimage(2n);
     const treeOld = buildTree(older, manifestPreimage(1n), 24);
     const treeNew = buildTree(current, manifest, 40);
@@ -232,6 +240,8 @@ export async function buildZkSyncSyntheticFixture(port = Number(process.env.CLPR
                 root: pNew.root,
                 olderRoot: pOld.root,
                 manifestPreimage: manifest,
+                bundleContent,
+                payloadCount: payloads.length,
                 expected: {
                     status: Number(current.status),
                     nextMessageId: Number(current.nextMessageId),
