@@ -211,6 +211,7 @@ proofs), re-run 2026-10-01:
 | Mantle PROPOSED `verifyBundle` | #22318 (newest) | 3,672,351 | 38,020 B |
 | Blast PROPOSED `verifyBundle` | #22780 | 3,048,294 | 30,884 B |
 | Katana FINALIZED `verifyBundle` | #10438 (newest) | 2,634,859 | 22,756 B |
+| Fraxtal FINALIZED `verifyBundle` (no state validation: trusts the proposer, 7-day challenger veto) | live | 3,031,541 | 30,564 B |
 
 Estimate, not a measurement: Mantle plus a rotation is about 8.5M gas and 105 KB, within both limits; a
 relayer should not add a manifest update to a rotation bundle. Bundle size grows with the depth of the L1
