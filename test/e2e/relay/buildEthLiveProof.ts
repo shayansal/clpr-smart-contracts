@@ -160,7 +160,8 @@ export interface LightClientUpdateJson {
     };
 }
 
-export interface LiveCapture {
+/// Everything a light-client proof needs (no execution-layer proofs).
+export interface BeaconCapture {
     network: string;
     capturedAt: string;
     sources: {beaconApi: string; executionRpc: string};
@@ -176,6 +177,9 @@ export interface LiveCapture {
     /// `light_client/updates?start_period={signing period}` — a real rotation (`next_sync_committee`
     /// + branch against the attested state root), signed by the same committee.
     rotationUpdate?: LightClientUpdateJson;
+}
+
+export interface LiveCapture extends BeaconCapture {
     account: {
         address: string;
         blockNumber: string;
@@ -420,7 +424,7 @@ export interface SignedHeaderInputs {
 }
 
 function signedHeaderInputs(
-    capture: LiveCapture,
+    capture: BeaconCapture,
     committee: DecodedCommittee,
     attested: BeaconHeaderJson,
     agg: SyncAggregateJson,
@@ -463,7 +467,7 @@ function currentCommitteeGindex(version: string): bigint {
 
 /// The committee that signed the finality update, authenticated off-chain against the bootstrap
 /// header's state root (or the committee update's attested state root).
-export function signingCommittee(capture: LiveCapture): {committee: DecodedCommittee; period: bigint} {
+export function signingCommittee(capture: BeaconCapture): {committee: DecodedCommittee; period: bigint} {
     const spp = slotsPerPeriod(capture.spec);
     const sigPeriod = BigInt(capture.finalityUpdate.data.signature_slot) / spp;
     const boot = capture.bootstrap.data;
@@ -554,9 +558,21 @@ export interface EthLiveProof {
     };
 }
 
-/// Pure/offline: turn a `LiveCapture` into the verifier's wire format, cross-checking every step
-/// (committee branch, aggregate, off-chain BLS, SSZ folds, execution block binding).
-export function buildEthLiveProof(capture: LiveCapture): EthLiveProof {
+/// The light-client half of a live proof: the signed attested header and the execution state_root
+/// branch, cross-checked (committee branch, aggregate, off-chain BLS, SSZ folds). Shared by
+/// `EthMainnetVerifier` bundles and the `EthL1StateVerifier` proofs of the OP Stack verifiers.
+export interface LiveLightClient {
+    committee: DecodedCommittee;
+    period: bigint;
+    signatureSlot: bigint;
+    signed: SignedHeaderInputs;
+    exec: {stateRoot: Buffer; branch: Buffer[]};
+    /// `EthL1StateVerifier.verifyL1State` proof: RLP `[attestedHeader, syncAggregate, executionStateRoot,
+    /// executionBranch, nextCommittee(empty), nextCommitteeBranch(empty), nonSignerProofs]`.
+    lightClientProof: Hex;
+}
+
+export function buildLiveLightClient(capture: BeaconCapture): LiveLightClient {
     const fu = capture.finalityUpdate;
     if (!SUPPORTED_FORKS.has(fu.version)) {
         throw new Error(`unsupported light-client fork "${fu.version}" (supported: ${[...SUPPORTED_FORKS]})`);
@@ -564,9 +580,71 @@ export function buildEthLiveProof(capture: LiveCapture): EthLiveProof {
     const attested = fu.data.attested_header;
     const signatureSlot = BigInt(fu.data.signature_slot);
     const {committee, period} = signingCommittee(capture);
-
     const signed = signedHeaderInputs(capture, committee, attested.beacon, fu.data.sync_aggregate, signatureSlot);
     const exec = buildExecutionStateRootBranch(attested);
+    const lightClientProof = hex(rlpEncode([
+        signed.attestedHeaderRlp,
+        [signed.bits, signed.signatureUncompressed],
+        exec.stateRoot,
+        exec.branch,
+        Buffer.alloc(0),
+        [],
+        signed.nonSignerEntries
+    ]));
+    return {committee, period, signatureSlot, signed, exec, lightClientProof};
+}
+
+/// A real sync-committee rotation as an `EthL1StateVerifier.verifyL1State` proof: the capture's
+/// `rotationUpdate` (signed by the same committee as the finality update) with its next_sync_committee
+/// and branch, so the verifier returns the successor anchor. Undefined when the capture has no
+/// same-period update.
+export interface LiveRotationLightClient {
+    lightClientProof: Hex;
+    executionBlockNumber: bigint;
+    executionStateRoot: Hex;
+    participants: number;
+    nextPeriod: bigint;
+    nextCommitteeMerkleRoot: Hex;
+    nextAggregate: Hex;
+}
+
+export function buildLiveRotationLightClient(capture: BeaconCapture): LiveRotationLightClient | undefined {
+    const ru = capture.rotationUpdate;
+    if (!ru || !SUPPORTED_FORKS.has(ru.version)) return undefined;
+    const {committee, period} = signingCommittee(capture);
+    const spp = slotsPerPeriod(capture.spec);
+    const u = ru.data;
+    if (BigInt(u.signature_slot) / spp !== period) return undefined;
+    verifyNextCommitteeBranch(u);
+    const rs = signedHeaderInputs(capture, committee, u.attested_header.beacon, u.sync_aggregate, BigInt(u.signature_slot));
+    const exec = buildExecutionStateRootBranch(u.attested_header);
+    const next = decodeCommittee(u.next_sync_committee);
+    const lightClientProof = hex(rlpEncode([
+        rs.attestedHeaderRlp,
+        [rs.bits, rs.signatureUncompressed],
+        exec.stateRoot,
+        exec.branch,
+        [next.pubkeys, next.aggregate],
+        u.next_sync_committee_branch.map(hexToBuf),
+        rs.nonSignerEntries
+    ]));
+    return {
+        lightClientProof,
+        executionBlockNumber: BigInt(u.attested_header.execution.block_number),
+        executionStateRoot: u.attested_header.execution.state_root as Hex,
+        participants: rs.participants,
+        nextPeriod: BigInt(u.attested_header.beacon.slot) / spp + 1n,
+        nextCommitteeMerkleRoot: hex(committeeMerkleRoot(next.pubkeys)),
+        nextAggregate: hex(next.aggregate)
+    };
+}
+
+/// Pure/offline: turn a `LiveCapture` into the verifier's wire format, cross-checking every step
+/// (committee branch, aggregate, off-chain BLS, SSZ folds, execution block binding).
+export function buildEthLiveProof(capture: LiveCapture): EthLiveProof {
+    const fu = capture.finalityUpdate;
+    const attested = fu.data.attested_header;
+    const {committee, period, signatureSlot, signed, exec} = buildLiveLightClient(capture);
 
     // Execution-layer binding: eth_getProof was taken at the attested header's execution block.
     const acct = capture.account;
@@ -691,7 +769,7 @@ export function reencodeBundle(p: EthLiveProof["parts"], override: Partial<EthLi
 }
 
 // ── Live capture ───────────────────────────────────────────────────────────
-async function getJson<T>(bases: string[], p: string): Promise<{json: T; base: string}> {
+export async function getJson<T>(bases: string[], p: string): Promise<{json: T; base: string}> {
     let lastErr: unknown;
     for (const base of bases) {
         try {
@@ -706,7 +784,7 @@ async function getJson<T>(bases: string[], p: string): Promise<{json: T; base: s
 }
 
 let rpcId = 0;
-async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T> {
+export async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T> {
     const res = await fetch(url, {
         method: "POST",
         headers: {"content-type": "application/json"},
@@ -717,22 +795,20 @@ async function rpc<T>(url: string, method: string, params: unknown[]): Promise<T
     return j.result as T;
 }
 
-/// Capture a consistent live dataset: finality update → execution proof at the attested block
-/// (fetched immediately, while a non-archive node still has that state) → signing committee →
-/// a same-period rotation update.
-export async function captureSepoliaLive(opts: {
+/// Capture a consistent beacon dataset: finality update → `onAttested` (execution-layer reads at the
+/// attested block, run immediately while a non-archive node still has that state) → signing committee
+/// → a same-period rotation update.
+export async function captureBeaconLive<T>(opts: {
     beaconApis?: string[];
-    executionRpc?: string;
-    account?: Hex;
     /// Poll (one slot at a time) for up to this long for an update with at least one non-signer, so
     /// the fixture exercises the non-signer Merkle proofs + complement aggregation. Sepolia usually
     /// runs at 512/512; a partial aggregate shows up every few minutes. 0 = take the first update.
     waitForNonSignersMs?: number;
-} = {}): Promise<LiveCapture> {
+}, onAttested: (execution: ExecutionPayloadHeaderJson, blockTag: Hex) => Promise<T>): Promise<{
+    beacon: BeaconCapture;
+    extra: T;
+}> {
     const apis = opts.beaconApis ?? DEFAULT_BEACON_APIS;
-    const rpcUrl = opts.executionRpc ?? DEFAULT_EXECUTION_RPC;
-    const address = opts.account ?? DEFAULT_ACCOUNT;
-
     const deadline = Date.now() + (opts.waitForNonSignersMs ?? 0);
     let fu: FinalityUpdateJson;
     let base: string;
@@ -749,12 +825,8 @@ export async function captureSepoliaLive(opts: {
     }
     const order = [base, ...apis.filter((a) => a !== base)];
     const execution = fu.data.attested_header.execution;
-    const blockTag = "0x" + BigInt(execution.block_number).toString(16);
-    const storageKeys = deriveChannelSlots(LIVE_CHANNEL_ID);
-    const proof = await rpc<LiveCapture["account"]["proof"]>(rpcUrl, "eth_getProof", [address, storageKeys, blockTag]);
-    const block = await rpc<{hash: string; stateRoot: string; number: string}>(
-        rpcUrl, "eth_getBlockByNumber", [blockTag, false]
-    );
+    const blockTag = ("0x" + BigInt(execution.block_number).toString(16)) as Hex;
+    const extra = await onAttested(execution, blockTag);
 
     const {json: genesis} = await getJson<{data: {genesis_validators_root: string}}>(order, "/eth/v1/beacon/genesis");
     const {json: specRaw} = await getJson<{data: Record<string, string>}>(order, "/eth/v1/config/spec");
@@ -790,17 +862,40 @@ export async function captureSepoliaLive(opts: {
     }
 
     return {
-        network: spec.CONFIG_NAME ?? "unknown",
-        capturedAt: new Date().toISOString(),
-        sources: {beaconApi: base, executionRpc: rpcUrl},
-        genesisValidatorsRoot: genesis.data.genesis_validators_root,
-        spec,
-        finalityUpdate: fu,
-        bootstrap,
-        committeeUpdate,
-        rotationUpdate,
-        account: {address, blockNumber: execution.block_number, block, proof, storageKeys}
+        beacon: {
+            network: spec.CONFIG_NAME ?? "unknown",
+            capturedAt: new Date().toISOString(),
+            sources: {beaconApi: base, executionRpc: ""},
+            genesisValidatorsRoot: genesis.data.genesis_validators_root,
+            spec,
+            finalityUpdate: fu,
+            bootstrap,
+            committeeUpdate,
+            rotationUpdate
+        },
+        extra
     };
+}
+
+/// Capture a consistent live dataset: the beacon part plus `eth_getProof` of `account` (with the
+/// channelId-derived slots) at the attested execution block.
+export async function captureSepoliaLive(opts: {
+    beaconApis?: string[];
+    executionRpc?: string;
+    account?: Hex;
+    waitForNonSignersMs?: number;
+} = {}): Promise<LiveCapture> {
+    const rpcUrl = opts.executionRpc ?? DEFAULT_EXECUTION_RPC;
+    const address = opts.account ?? DEFAULT_ACCOUNT;
+    const storageKeys = deriveChannelSlots(LIVE_CHANNEL_ID);
+    const {beacon, extra: account} = await captureBeaconLive(opts, async (execution, blockTag) => {
+        const proof = await rpc<LiveCapture["account"]["proof"]>(rpcUrl, "eth_getProof", [address, storageKeys, blockTag]);
+        const block = await rpc<{hash: string; stateRoot: string; number: string}>(
+            rpcUrl, "eth_getBlockByNumber", [blockTag, false]
+        );
+        return {address, blockNumber: execution.block_number, block, proof, storageKeys};
+    });
+    return {...beacon, sources: {beaconApi: beacon.sources.beaconApi, executionRpc: rpcUrl}, account};
 }
 
 export function loadLiveCapture(file = SEPOLIA_LIVE_FIXTURE): LiveCapture {
