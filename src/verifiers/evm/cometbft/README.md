@@ -30,7 +30,7 @@ Every row below comes from that chain's live public RPC on 2026-10-01. The fixtu
 | **Mezo** | CometBFT 0.38.19 | Ed25519 | 21 (all power 1) | **15** | EVM in IAVL store `evm`, key `0x02‖addr‖slot` (Evmos fork) → ICS-23 | **Covered.** Live `verifyBundle` 12.84M gas |
 | Sei | CometBFT (sei-tendermint) | Ed25519 | — | — | EVM in IAVL store `evm`, key `0x03‖addr‖slot` | Covered by profile (`0x03`); production path is `SeiCometBftVerifier` |
 | **Polygon PoS** (Heimdall v2) | CometBFT 0.38.22, Polygon fork | **secp256k1eth**: 65 B key, r‖s‖v over keccak256 | 104 | **10** | Heimdall app state is not EVM. Bor (EVM, MPT) block hashes are in the `milestone` store, key `0x81‖count` | **Light client covered** (live commit 1.54M gas). Milestone → Bor header → MPT adapter not built (§7) |
-| **dYdX v4** | CometBFT 0.38.5 | Ed25519 | 21 | 10 | Native Cosmos modules only. No `wasm` store, no EVM (checked: `no such store: wasm`) | Light client fits (6.75M). No place for a CLPR Service contract |
+| **dYdX v4** | CometBFT 0.38.5 | Ed25519 | 21 | 10 | Native Cosmos modules only. No `wasm` store, no EVM (checked: `no such store: wasm`) | Light client fits (6.75M). CLPR Service = native module: **`x/clpr` prototype + `CosmosModuleVerifier`** ([../dydx](../dydx/README.md)), live-mainnet store proof 7.03M |
 | **Provenance** | CometBFT 0.38.22 | Ed25519 | 100 | 18 | CosmWasm: `wasm` store, key `0x03‖contract(32 B)‖key` | **Covered** by `CosmWasmVerifier` ([../provenance](../provenance/README.md)). Live full bundle in one tx 13.12M; split mode 0.52M + `accumulate` txs |
 | **THORChain** | CometBFT 0.38.19 | Ed25519 | 99 (all power 100) | **67** | CosmWasm `wasm` store (App Layer) | Commit alone is 43.6M gas in one tx. **Fits split**: `CometBftCommitAccumulator` over 4 txs (11.1–11.9M each, live), then `CosmWasmVerifier` by header hash |
 | **Arc** (Circle) | **Malachite** (Tendermint algorithm, not CometBFT) | Ed25519 over **SSZ** votes | 22 (testnet) | 11 | EVM (reth), **MPT**. Validator set is EVM storage of `ValidatorRegistry` at `0x3600…0002` | Live certificate checked off-chain. Different wire format, so a separate adapter (§7) |
@@ -251,8 +251,8 @@ Cronos node served about 500k blocks of history.
 - **CosmWasm chains** (Provenance, THORChain): covered by `CosmWasmVerifier`
   ([../provenance](../provenance/README.md)), which fixes the CosmWasm CLPR Service's queue-record
   layout and sketches the service. No CosmWasm CLPR Service is deployed yet.
-- **dYdX.** No contract runtime, so a CLPR Service would have to be a native module. The light
-  client is ready.
+- **dYdX.** No contract runtime, so the CLPR Service is a native module: prototype `x/clpr`
+  (modules/x-clpr) and `CosmosModuleVerifier` ([../dydx](../dydx/README.md)).
 - **Sei** can move to this contract with a `0x03` profile once its relay emits the compact anchor.
 
 ## 8. Sources checked
