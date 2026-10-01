@@ -26,6 +26,7 @@ import {
     OP_SUCCINCT_LITE_LAYOUT,
     outputRootPreimage,
     ROOT_FORMAT,
+    superRootPreimage,
     slotHex,
     storageEntries,
     type DisputeProofParts,
@@ -85,6 +86,10 @@ export interface OpStackLiveChain {
     /// eth_getProof at "latest" only (staged ahead of the game, see `--stage-next`).
     l2LatestProofRpcs: string[];
     layout: OpStackLayout;
+    /// `OpStackOutputRootProof.RootFormat` (default OUTPUT_ROOT).
+    rootFormat?: number;
+    /// SUPER_ROOT_V1 chains: games claim an L2 timestamp, mapped to a block with this block time (s).
+    l2BlockTimeSeconds?: bigint;
     fixtureDir: string;
     channelId: Hex;
     beaconApis?: string[];
@@ -128,7 +133,30 @@ export const XLAYER: OpStackLiveChain = {
     forgeFixture: path.resolve(__dirname, "../../verifiers/evm/opstack/fixtures/xlayer-live.json")
 };
 
-export const OPSTACK_LIVE_CHAINS: Record<string, OpStackLiveChain> = {[BASE_SEPOLIA.name]: BASE_SEPOLIA, [XLAYER.name]: XLAYER};
+/// Further Ethereum-mainnet OP Stack chains, one deployment profile each (src/verifiers/evm/opstack/profiles/).
+/// The portal named here must point at the ASR (checked at every capture).
+const mainnetChain = (name: string, c: Omit<OpStackLiveChain, "name" | "fixtureDir" | "channelId" | "forgeFixture">): OpStackLiveChain => ({
+    name,
+    beaconApis: XLAYER.beaconApis,
+    l1Rpc: XLAYER.l1Rpc,
+    ...c,
+    fixtureDir: path.resolve(__dirname, `../fixtures/${name}-live`),
+    channelId: keccak256(toHex(`clpr/opstack-live/${name}`)),
+    forgeFixture: path.resolve(__dirname, `../../verifiers/evm/opstack/fixtures/${name}-live.json`)
+});
+
+/// RISE (chain 4153): OP Succinct Lite (type 42), ASR 3.5.0 / DGF 1.3.0, as X Layer.
+export const RISE = mainnetChain("rise", {
+    l2ChainId: 4153,
+    optimismPortal: "0xad92Fa18EB74E46Db844240623124BF46589db4C",
+    anchorStateRegistry: "0x551A672d703966D83C3EC3ea0e844f43c3373c91",
+    l2Rpcs: ["https://rpc.risechain.com"],
+    l2LatestProofRpcs: ["https://rpc.risechain.com"],
+    layout: OP_SUCCINCT_LITE_LAYOUT
+});
+
+export const OPSTACK_LIVE_CHAINS: Record<string, OpStackLiveChain> = Object.fromEntries(
+    [BASE_SEPOLIA, XLAYER, RISE].map((c) => [c.name, c]));
 
 /// L2ToL1MessagePasser predeploy: a real contract with real code and storage on every OP Stack chain.
 export const L2_ACCOUNT: Hex = "0x4200000000000000000000000000000000000016";
@@ -162,7 +190,8 @@ const ABI = [
     {type: "function", name: "gameType", inputs: [], outputs: [{type: "uint32"}], stateMutability: "view"},
     {type: "function", name: "rootClaim", inputs: [], outputs: [{type: "bytes32"}], stateMutability: "view"},
     {type: "function", name: "extraData", inputs: [], outputs: [{type: "bytes"}], stateMutability: "view"},
-    {type: "function", name: "l2SequenceNumber", inputs: [], outputs: [{type: "uint256"}], stateMutability: "view"}
+    {type: "function", name: "l2SequenceNumber", inputs: [], outputs: [{type: "uint256"}], stateMutability: "view"},
+    {type: "function", name: "getAnchorRoot", inputs: [], outputs: [{type: "bytes32"}, {type: "uint256"}], stateMutability: "view"}
 ] as const;
 
 async function call<T>(url: string, to: Hex, fn: string, args: unknown[], blockTag: Hex | "latest"): Promise<T> {
@@ -198,6 +227,8 @@ export interface CapturedGame {
     gameType: number;
     rootClaim: Hex;
     extraData: Hex;
+    /// The game's `l2SequenceNumber`: an L2 block number, or an L2 timestamp on SUPER_ROOT_V1 chains
+    /// (`l2.blockNumber` is then the block at that timestamp).
     l2BlockNumber: string;
     code: Hex;
     proof: EthGetProofResult; // the game's state slots at B (slot 0, plus the wasRespected slot)
@@ -226,7 +257,16 @@ export interface OpStackLiveCapture {
         asrImplProof: EthGetProofResult;
         dgfProof: EthGetProofResult;
     };
-    games: {anchor: CapturedGame; newest: CapturedGame; resolved?: CapturedGame; pending: CapturedGame[]};
+    games: {
+        /// ASR.anchorGame; null when none is set (the anchor is then the starting anchor root).
+        anchor: CapturedGame | null;
+        startingAnchor?: {root: Hex; l2BlockNumber: string; l2: L2Output};
+        newest: CapturedGame;
+        resolved?: CapturedGame;
+        /// The newest game of the respected type that is finalized at B (isGameClaimValid).
+        finalized?: CapturedGame;
+        pending: CapturedGame[];
+    };
     /// keccak256 of L2_ACCOUNT's code at the L2 head, for captures that carry no L2 account proof.
     l2AccountCodeHash?: Hex;
 }
@@ -242,9 +282,22 @@ interface PendingStage {
     l2: L2Output;
 }
 
-async function captureL2Output(chain: OpStackLiveChain, blockNumber: bigint, withProof: boolean): Promise<L2Output> {
+/// The L2 block a game claims: its sequence number, or (SUPER_ROOT_V1) the block at that timestamp.
+async function l2BlockOf(chain: OpStackLiveChain, sequenceNumber: bigint): Promise<bigint> {
+    if ((chain.rootFormat ?? ROOT_FORMAT.OUTPUT_ROOT) !== ROOT_FORMAT.SUPER_ROOT_V1) return sequenceNumber;
+    const head = await l2rpc<{number: Hex; timestamp: Hex}>(chain, "eth_getBlockByNumber", ["latest", false]);
+    const dt = BigInt(head.timestamp) - sequenceNumber;
+    if (dt < 0n || dt % chain.l2BlockTimeSeconds! !== 0n) throw new Error(`L2 timestamp ${sequenceNumber} is not a block time`);
+    return BigInt(head.number) - dt / chain.l2BlockTimeSeconds!;
+}
+
+async function captureL2Output(chain: OpStackLiveChain, sequenceNumber: bigint, withProof: boolean): Promise<L2Output> {
+    const blockNumber = await l2BlockOf(chain, sequenceNumber);
     const tag = "0x" + blockNumber.toString(16);
-    const h = await l2rpc<{hash: Hex; stateRoot: Hex; withdrawalsRoot: Hex}>(chain, "eth_getBlockByNumber", [tag, false]);
+    const h = await l2rpc<{hash: Hex; stateRoot: Hex; withdrawalsRoot: Hex; timestamp: Hex}>(chain, "eth_getBlockByNumber", [tag, false]);
+    if (blockNumber !== sequenceNumber && BigInt(h.timestamp) !== sequenceNumber) {
+        throw new Error(`L2 block ${blockNumber} has timestamp ${BigInt(h.timestamp)}, not ${sequenceNumber}`);
+    }
     let proof: L2Output["proof"] = null;
     if (withProof) {
         try {
@@ -282,7 +335,7 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
     const asr = chain.anchorStateRegistry;
     const pending = loadPending(chain);
 
-    const {beacon, extra} = await captureBeaconLive({...opts, beaconApis}, async (_execution, B) => {
+    const {beacon, extra} = await captureBeaconLive({...opts, beaconApis}, async (execution, B) => {
         const portalAsr = await call<Hex>(l1Rpc, chain.optimismPortal, "anchorStateRegistry", [], B);
         if (portalAsr.toLowerCase() !== asr.toLowerCase()) throw new Error(`portal ASR moved to ${portalAsr}`);
         const head = await rpc<EthGetProofResult>(l1Rpc, "eth_getProof", [asr, asrSlots(L), B]);
@@ -321,7 +374,42 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
         const newest = recent[0];
         if (!newest) throw new Error("no game of the respected type");
         const resolved = recent.find((g) => statusOf(L, g.proof) === GAME_STATUS.DEFENDER_WINS);
-        const anchor = await readGame(anchorGame);
+        const anchor = BigInt(anchorGame) === 0n ? null : await readGame(anchorGame);
+        const startingAnchor = anchor ? undefined : await call<[Hex, bigint]>(l1Rpc, asr, "getAnchorRoot", [], B)
+            .then(([root, seq]) => ({root, l2BlockNumber: seq.toString()}));
+        if (startingAnchor && BigInt(startingAnchor.root) !== v.get(L.asrStartingAnchorRootSlot)) {
+            throw new Error("getAnchorRoot() != startingAnchorRoot slot while no anchor game is set");
+        }
+        // The newest game that is final at B (status DEFENDER_WINS, resolved more than the delay ago):
+        // scanned with gameAtIndex + the game's state slot only, then read in full.
+        const l1Time = BigInt(execution.timestamp);
+        const delayAtB = await call<bigint>(l1Rpc, asr, "disputeGameFinalityDelaySeconds", [], B);
+        const isFinal = (word: bigint) => {
+            const f = (off: bigint, bits: bigint) => (word >> (off * 8n)) & ((1n << bits) - 1n);
+            const resolvedAt = f(L.gameResolvedAtOffset, 64n);
+            return Number(f(L.gameStatusOffset, 8n)) === GAME_STATUS.DEFENDER_WINS && resolvedAt !== 0n && l1Time - resolvedAt > delayAtB;
+        };
+        let finalized = recent.find((g) => isFinal(slotValue(g.proof, L.gameStateSlot)));
+        // A final game was created more than the delay ago, and creation times are non-decreasing in the
+        // factory's list: binary-search the newest such index, then walk back to a final game.
+        let top = count - 1n;
+        if (!finalized) {
+            let lo = 0n;
+            let hi = count - 1n;
+            const createdAt = async (i: bigint) => (await call<[number, bigint, Hex]>(l1Rpc, dgf, "gameAtIndex", [i], B))[1];
+            while (lo < hi) {
+                const mid = (lo + hi + 1n) / 2n;
+                if (await createdAt(mid) + delayAtB < l1Time) lo = mid;
+                else hi = mid - 1n;
+            }
+            top = lo;
+        }
+        for (let i = top; !finalized && i >= 0n && i >= top - 200n; i--) {
+            const [type, , addr] = await call<[number, bigint, Hex]>(l1Rpc, dgf, "gameAtIndex", [i], B);
+            if (type !== respectedGameType) continue;
+            const word = BigInt(await rpc<Hex>(l1Rpc, "eth_getStorageAt", [addr, slotHex(L.gameStateSlot), B]));
+            if (isFinal(word)) finalized = await readGame(addr);
+        }
         // Pending stages: those with an address, plus address-less ones whose game has appeared since.
         const pend: Awaited<ReturnType<typeof readGame>>[] = [];
         for (const p of pending) {
@@ -329,7 +417,8 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
                 : recent.find((r) => r.l2BlockNumber === p.l2BlockNumber);
             if (g && !pend.some((x) => x.address === g.address)) pend.push(g);
         }
-        const all = [anchor, newest, ...(resolved ? [resolved] : []), ...pend];
+        const all = [...(anchor ? [anchor] : []), newest, ...(resolved ? [resolved] : []), ...(finalized ? [finalized] : []), ...pend]
+            .filter((g, i, a) => a.findIndex((x) => x.address.toLowerCase() === g.address.toLowerCase()) === i);
 
         const asrProof = await rpc<EthGetProofResult>(l1Rpc, "eth_getProof", [asr, asrSlots(L, all.map((g) => g.address)), B]);
         const asrImplProof = await rpc<EthGetProofResult>(l1Rpc, "eth_getProof", [impl, [], B]);
@@ -342,7 +431,7 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
         // DGF < 1.6 has no gameArgs(): its clones carry no implementation args.
         const gameArgs = await call<Hex>(l1Rpc, dgf, "gameArgs", [respectedGameType], B).catch(() => "0x" as Hex);
         return {
-            anchor, newest, resolved, pend,
+            anchor, startingAnchor, newest, resolved, finalized, pend,
             l1: {
                 block: {number: block.number, hash: block.hash, stateRoot: block.stateRoot, timestamp: block.timestamp},
                 anchorStateRegistry: asr,
@@ -362,7 +451,10 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
     // A staged L2 output for the game's block wins; otherwise ask the L2 RPCs (null outside their window).
     const l2Of = async (g: {l2BlockNumber: string}) =>
         pending.find((p) => p.l2BlockNumber === g.l2BlockNumber)?.l2 ?? captureL2Output(chain, BigInt(g.l2BlockNumber), true);
-    const anchor = {...extra.anchor, l2: await l2Of(extra.anchor)};
+    const anchor = extra.anchor ? {...extra.anchor, l2: await l2Of(extra.anchor)} : null;
+    const startingAnchor = extra.startingAnchor
+        ? {...extra.startingAnchor, l2: await captureL2Output(chain, BigInt(extra.startingAnchor.l2BlockNumber), false)} : undefined;
+    const finalized = extra.finalized ? {...extra.finalized, l2: await l2Of(extra.finalized)} : undefined;
     const newest = {...extra.newest, l2: await l2Of(extra.newest)};
     const resolved = extra.resolved ? {...extra.resolved, l2: await l2Of(extra.resolved)} : undefined;
     const pend = await Promise.all(extra.pend.map(async (g) => ({...g, l2: await l2Of(g)})));
@@ -375,7 +467,8 @@ export async function captureOpStackLive(chain: OpStackLiveChain, opts: {
         sources: {beaconApi: beacon.sources.beaconApi, l1Rpc, l2Rpcs: [...chain.l2Rpcs, ...chain.l2LatestProofRpcs]},
         beacon: {...beacon, sources: {beaconApi: beacon.sources.beaconApi, executionRpc: l1Rpc}},
         l1: {genesisTime: genesis.data.genesis_time, ...extra.l1},
-        games: {anchor, newest, ...(resolved ? {resolved} : {}), pending: pend},
+        games: {anchor, ...(startingAnchor ? {startingAnchor} : {}), newest, ...(resolved ? {resolved} : {}),
+            ...(finalized ? {finalized} : {}), pending: pend},
         l2AccountCodeHash
     };
 }
@@ -412,7 +505,10 @@ export interface OpStackLiveProof {
     l2CodeHash: Hex;
     respectedGameType: number;
     anchorMode: OpStackLiveGameCase;
-    anchorGame: OpStackLiveGameCase;
+    /// The anchor game in GAME mode; null when the ASR has no anchor game (starting anchor root).
+    anchorGame: OpStackLiveGameCase | null;
+    /// The newest game final at the captured L1 block, when the capture found one.
+    finalized: OpStackLiveGameCase | null;
     newest: OpStackLiveGameCase;
     /// Resolved DEFENDER_WINS but (on chains with a delay) not yet finalized, when captured.
     resolved: OpStackLiveGameCase | null;
@@ -485,7 +581,7 @@ export function buildOpStackLiveProof(c: OpStackLiveCapture): OpStackLiveProof {
     }
 
     const profile: OpStackProfile = {
-        rootFormat: ROOT_FORMAT.OUTPUT_ROOT,
+        rootFormat: chain.rootFormat ?? ROOT_FORMAT.OUTPUT_ROOT,
         l2ChainId: BigInt(chain.l2ChainId),
         anchorStateRegistry: c.l1.anchorStateRegistry,
         anchorStateRegistryImplCodeHash: c.l1.asrImplProof.codeHash as Hex,
@@ -495,7 +591,9 @@ export function buildOpStackLiveProof(c: OpStackLiveCapture): OpStackLiveProof {
         layout: L
     };
 
-    const all = [c.games.anchor, c.games.newest, ...(c.games.resolved ? [c.games.resolved] : []), ...c.games.pending];
+    const all = [...(c.games.anchor ? [c.games.anchor] : []), c.games.newest, ...(c.games.resolved ? [c.games.resolved] : []),
+        ...(c.games.finalized ? [c.games.finalized] : []), ...c.games.pending]
+        .filter((g, i, a) => a.findIndex((x) => x.address.toLowerCase() === g.address.toLowerCase()) === i);
     const asrKeys = asrSlots(L, all.map((g) => g.address));
     const dgfKeys = all.map((g) => dgfGameSlot(gameUuid(g.gameType, g.rootClaim, g.extraData), L));
     const base = {
@@ -518,13 +616,30 @@ export function buildOpStackLiveProof(c: OpStackLiveCapture): OpStackLiveProof {
     const channelContext = (channelId + L2_ACCOUNT.slice(2).toLowerCase()) as Hex;
     const chSlots = deriveChannelSlots(channelId);
 
-    const gameCase = (g: CapturedGame, mode: number): OpStackLiveGameCase => {
+    const isSuper = profile.rootFormat === ROOT_FORMAT.SUPER_ROOT_V1;
+    /// The claimed root's super-root preimage (SUPER_ROOT_V1): the game's extraData when it is one (SuperFaultDisputeGame
+    /// 0.8 puts the whole preimage there), else the single-chain preimage at the claimed timestamp.
+    const superOf = (g: {rootClaim: Hex; extraData: Hex; l2BlockNumber: string}, outputRoot: Hex): Hex => {
+        const sp = keccak256(g.extraData) === g.rootClaim.toLowerCase() ? g.extraData
+            : superRootPreimage(BigInt(g.l2BlockNumber), [{chainId: BigInt(chain.l2ChainId), outputRoot}]).preimage;
+        if (keccak256(sp) !== g.rootClaim.toLowerCase()) throw new Error(`super root preimage does not hash to ${g.rootClaim}`);
+        const body = sp.slice(2 + 18);
+        const entries = Array.from({length: body.length / 128}, (_, i) => body.slice(128 * i, 128 * (i + 1)));
+        if (sp.slice(2, 4) !== "01" || BigInt("0x" + sp.slice(4, 20)) !== BigInt(g.l2BlockNumber)
+            || !entries.some((e) => BigInt("0x" + e.slice(0, 64)) === BigInt(chain.l2ChainId) && "0x" + e.slice(64) === outputRoot)) {
+            throw new Error(`super root ${g.rootClaim}: no entry (chain ${chain.l2ChainId}, ${outputRoot}) at ${g.l2BlockNumber}`);
+        }
+        return sp as Hex;
+    };
+    type Claim = Omit<CapturedGame, "address" | "code" | "proof"> & Partial<Pick<CapturedGame, "address" | "code" | "proof">>;
+    const gameCase = (g: Claim, mode: number): OpStackLiveGameCase => {
         const {preimage, outputRoot} = outputRootPreimage(g.l2.header.stateRoot, g.l2.header.withdrawalsRoot, g.l2.header.hash);
-        if (outputRoot !== g.rootClaim.toLowerCase() && outputRoot !== g.rootClaim) {
+        const superRootPreimage = isSuper ? superOf(g, outputRoot) : "0x";
+        if (!isSuper && outputRoot !== g.rootClaim.toLowerCase()) {
             throw new Error(`game ${g.address}: output root ${outputRoot} != rootClaim ${g.rootClaim}`);
         }
-        if (mode === MODE.GAME) checkCloneArgs(g, c.l1.gameImplementation, c.l1.gameArgs ?? "0x");
-        const st = unpackGameState(L, g.proof);
+        if (mode === MODE.GAME) checkCloneArgs(g as CapturedGame, c.l1.gameImplementation, c.l1.gameArgs ?? "0x");
+        const st = g.proof ? unpackGameState(L, g.proof) : {status: GAME_STATUS.DEFENDER_WINS, createdAt: 0n, resolvedAt: 0n, wasRespected: true};
         if (!st.wasRespected) throw new Error(`game ${g.address}: wasRespectedGameTypeWhenCreated is false`);
         if (g.l2.proof && g.l2.proof.storageHash.toLowerCase() !== g.l2.header.withdrawalsRoot.toLowerCase()) {
             throw new Error("L2ToL1MessagePasser storage root != header withdrawalsRoot");
@@ -534,13 +649,14 @@ export function buildOpStackLiveProof(c: OpStackLiveCapture): OpStackLiveProof {
             mode,
             gameType: g.gameType,
             extraData: g.extraData,
-            gameAccountProof: mode === MODE.GAME ? accountNodes(g.proof) : [],
-            gameCode: mode === MODE.GAME ? g.code : "0x",
-            gameStorageProof: mode === MODE.GAME ? storageEntries(g.proof, gameSlots(L)) : []
+            gameAccountProof: mode === MODE.GAME ? accountNodes(g.proof!) : [],
+            gameCode: mode === MODE.GAME ? g.code! : "0x",
+            gameStorageProof: mode === MODE.GAME ? storageEntries(g.proof!, gameSlots(L)) : [],
+            superRootPreimage
         };
         const common = {lightClientProof: lightClient.lightClientProof, dispute, outputRootPreimage: preimage};
         return {
-            game: g.address,
+            game: g.address ?? ("0x" + "00".repeat(20)) as Hex,
             gameType: g.gameType,
             status: st.status,
             createdAt: st.createdAt,
@@ -572,8 +688,12 @@ export function buildOpStackLiveProof(c: OpStackLiveCapture): OpStackLiveProof {
         l2Account: L2_ACCOUNT,
         l2CodeHash,
         respectedGameType: c.l1.respectedGameType,
-        anchorMode: gameCase(c.games.anchor, MODE.ANCHOR),
-        anchorGame: gameCase(c.games.anchor, MODE.GAME),
+        anchorMode: c.games.anchor ? gameCase(c.games.anchor, MODE.ANCHOR) : gameCase({
+            gameType: c.l1.respectedGameType, rootClaim: c.games.startingAnchor!.root, extraData: "0x",
+            l2BlockNumber: c.games.startingAnchor!.l2BlockNumber, l2: c.games.startingAnchor!.l2
+        }, MODE.ANCHOR),
+        anchorGame: c.games.anchor ? gameCase(c.games.anchor, MODE.GAME) : null,
+        finalized: c.games.finalized ? gameCase(c.games.finalized, MODE.GAME) : null,
         newest: gameCase(c.games.newest, MODE.GAME),
         resolved: c.games.resolved ? gameCase(c.games.resolved, MODE.GAME) : null,
         pendingFinalized: c.games.pending.map((g) => gameCase(g, MODE.GAME)).filter(finalizedAt)
@@ -591,7 +711,7 @@ export function forgeFixtureOf(p: OpStackLiveProof): unknown {
     const c = (x: OpStackLiveGameCase | null) => x ? {proof: x.l2StateRootProof, l2StateRoot: x.l2StateRoot, game: x.game,
         status: x.status, resolvedAt: Number(x.resolvedAt)} : null;
     const proposed = [p.newest, ...(p.resolved ? [p.resolved] : [])].find((x) => x.bundle);
-    const final = p.pendingFinalized.find((x) => x.bundle) ?? (p.anchorGame.bundle ? p.anchorGame : undefined);
+    const final = p.pendingFinalized.find((x) => x.bundle) ?? [p.finalized, p.anchorGame].find((x) => x?.bundle) ?? undefined;
     return {
         l1GenesisTime: Number(p.l1GenesisTime),
         l1Time: Number(p.l1Time),
@@ -609,6 +729,7 @@ export function forgeFixtureOf(p: OpStackLiveProof): unknown {
         },
         anchorMode: c(p.anchorMode),
         anchorGame: c(p.anchorGame),
+        ...(p.finalized ? {finalized: c(p.finalized)} : {}),
         resolved: c(p.resolved),
         newest: c(p.newest),
         proposedBundle: proposed?.bundle ?? "0x",
@@ -626,7 +747,8 @@ function summarize(p: OpStackLiveProof): string {
         `ASR ${p.profile.anchorStateRegistry} impl codeHash ${p.profile.anchorStateRegistryImplCodeHash}`,
         `respected game type ${p.respectedGameType}, finality delay ${p.profile.disputeGameFinalityDelaySeconds}s, ` +
             `game impl ${p.profile.gameImplementation}`,
-        `anchor  ${g(p.anchorGame)}`,
+        p.anchorGame ? `anchor  ${g(p.anchorGame)}` : `anchor  starting anchor root, L2 #${p.anchorMode.l2BlockNumber}`,
+        ...(p.finalized ? [`final   ${g(p.finalized)}`] : []),
         `newest  ${g(p.newest)}`,
         ...(p.resolved ? [`resolved ${g(p.resolved)}`] : []),
         `pending finalized: ${p.pendingFinalized.length}`

@@ -65,6 +65,15 @@ export const OP_SUCCINCT_LITE_LAYOUT: OpStackLayout = {
     gameWasRespectedOffset: 0n
 };
 
+/// ASR 3.9.0 / DGF 1.6.1 / PermissionedDisputeGame 2.4.0 (V2, game type 1: Ronin, BOB). From the Sourcify
+/// layout of Ronin's game implementation 0xe1dF…b87e: slot 0 packs createdAt | resolvedAt | status, and
+/// `wasRespectedGameTypeWhenCreated` is slot 10, offset 0. Same ASR/DGF slots as above.
+export const PERMISSIONED_DISPUTE_GAME_V2_LAYOUT: OpStackLayout = {
+    ...BASE_SEPOLIA_LAYOUT,
+    gameWasRespectedSlot: 10n,
+    gameWasRespectedOffset: 0n
+};
+
 export const ZERO_HASH: Hex = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 /// `OpStackOutputRootProof.RootFormat`.
