@@ -16,7 +16,7 @@ import {TonCellBuilder as B} from "./TonCellBuilder.sol";
 /// @notice Synthetic TonVerifier suite. A masterchain CLPR Service (workchain −1, exercising the
 ///         path the live basechain fixtures do not), 4 validators (weights 10/20/30/40), catchain and
 ///         Simplex signature modes, a key-block rotation, verifyConfig, and the negative cases.
-contract TonVerifierTest is Test {
+abstract contract TonVerifierFixture is Test {
     MockEd25519 internal ed;
     ClprEd25519SignatureCache internal cache;
     TonVerifier internal v;
@@ -33,8 +33,9 @@ contract TonVerifierTest is Test {
     bytes32[4] internal keysB;
     bytes internal manifest;
     bytes internal control;
+    bytes32 internal sentHash = keccak256("sent");
 
-    function setUp() public {
+    function setUp() public virtual {
         ed = new MockEd25519();
         cache = new ClprEd25519SignatureCache(ed);
         for (uint256 i = 0; i < 4; i++) {
@@ -62,13 +63,13 @@ contract TonVerifierTest is Test {
 
     // ── state builders ──────────────────────────────────────────────────────
 
-    function _accountBoc(bytes32 cfgC, bytes32 manC, uint64 nextId) internal pure returns (bytes memory) {
+    function _accountBoc(bytes32 cfgC, bytes32 manC, uint64 nextId) internal view returns (bytes memory) {
         B.Tree memory t = B.tree();
         B.W memory q = B.w();
         B.u(q, 1, 8);
         B.u(q, nextId, 64);
         B.u(q, 5, 64);
-        B.b32(q, keccak256("sent"));
+        B.b32(q, sentHash);
         B.b32(q, keccak256("recv"));
         B.u(q, 3, 64);
         uint256 queue = B.leaf(t, q);
@@ -333,7 +334,9 @@ contract TonVerifierTest is Test {
         vm.expectRevert(err);
         v.verifyBundle(proof, anchor, ctx);
     }
+}
 
+contract TonVerifierTest is TonVerifierFixture {
     // ── happy paths ─────────────────────────────────────────────────────────
 
     function test_verifyBundle_catchain() public view {
