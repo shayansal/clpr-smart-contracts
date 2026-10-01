@@ -129,7 +129,8 @@ contract StarknetVerifier is ClprEvmBundleVerifier {
         if (
             address(l1StateVerifier) == address(0) || address(stateProver) == address(0) || profile_.core == address(0)
                 || profile_.pinnedSlots.length != profile_.pinnedValues.length || layout_.channelsBase >= ADDR_BOUND
-                || layout_.messagesBase >= ADDR_BOUND || layout_.manifestCommitmentAddress + 1 >= FELT_LIMIT
+                || layout_.messagesBase >= ADDR_BOUND || layout_.manifestCommitmentAddress >= FELT_LIMIT - 1
+                || !_offsetsFit(layout_)
         ) revert InvalidDeployment();
         L1_STATE_VERIFIER = l1StateVerifier;
         STATE_PROVER = stateProver;
@@ -400,6 +401,13 @@ contract StarknetVerifier is ClprEvmBundleVerifier {
         uint256[] memory values =
             _verifyServiceStorage(p[IDX_STARKNET_PROOF], core.globalRoot, serviceAddress, genesisAnchor, keys);
         return _verifyStarknetManifest(values[0], values[1], RLP.readBytes(p[CM_IDX_MANIFEST_PREIMAGE]), serviceAddress);
+    }
+
+    /// @dev Cairo member offsets are u8 (`storage_address_from_base_and_offset`); u256 members use two.
+    function _offsetsFit(Layout memory l) private pure returns (bool) {
+        return l.statusOffset < 256 && l.nextMessageIdOffset < 256 && l.receivedMessageIdOffset < 256
+            && l.sentRunningHashOffset < 255 && l.receivedRunningHashOffset < 255
+            && l.endpointManifestVersionOffset < 256 && l.messageRunningHashOffset < 255;
     }
 
     function _requireBits(uint256[] memory v, uint256 i, uint256 bits) private pure {

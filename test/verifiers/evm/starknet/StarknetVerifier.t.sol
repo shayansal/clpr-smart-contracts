@@ -502,6 +502,10 @@ contract StarknetVerifierTest is StarknetFixture {
         l.channelsBase = 1 << 251;
         vm.expectRevert(StarknetVerifier.InvalidDeployment.selector);
         new StarknetVerifier(l1, prover, _profile(), l);
+        l = _layout();
+        l.sentRunningHashOffset = 255; // its high felt would need offset 256
+        vm.expectRevert(StarknetVerifier.InvalidDeployment.selector);
+        new StarknetVerifier(l1, prover, _profile(), l);
     }
 
     function test_profileAndLayout_roundTrip() public view {
