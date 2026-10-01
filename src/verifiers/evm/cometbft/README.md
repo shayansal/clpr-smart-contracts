@@ -29,10 +29,10 @@ Every row below comes from that chain's live public RPC on 2026-10-01. The fixtu
 | **Cronos** | CometBFT 0.38.13 | Ed25519 | 10 | **7** | EVM in IAVL store `evm`, key `0x02‖addr‖slot` (Ethermint) → ICS-23 | **Covered.** Live `verifyBundle` 7.84M gas |
 | **Mezo** | CometBFT 0.38.19 | Ed25519 | 21 (all power 1) | **15** | EVM in IAVL store `evm`, key `0x02‖addr‖slot` (Evmos fork) → ICS-23 | **Covered.** Live `verifyBundle` 12.84M gas |
 | Sei | CometBFT (sei-tendermint) | Ed25519 | — | — | EVM in IAVL store `evm`, key `0x03‖addr‖slot` | Covered by profile (`0x03`); production path is `SeiCometBftVerifier` |
-| **Polygon PoS** (Heimdall v2) | CometBFT 0.38.22, Polygon fork | **secp256k1eth**: 65 B key, r‖s‖v over keccak256 | 104 | **10** | Heimdall app state is not EVM. Bor (EVM, MPT) block hashes are in the `milestone` store, key `0x81‖count` | **Light client covered** (live commit 1.54M gas). Milestone → Bor header → MPT adapter not built (§7) |
+| **Polygon PoS** (Heimdall v2) | CometBFT 0.38.22, Polygon fork | **secp256k1eth**: 65 B key, r‖s‖v over keccak256 | 104 | **10** | Heimdall app state is not EVM. Bor (EVM, MPT) block hashes are in the `milestone` store, key `0x81‖count` | **Covered** by `PolygonPosVerifier` ([../polygon](../polygon/README.md)): milestone → Bor header → MPT. Live full bundle 3.45M gas |
 | **dYdX v4** | CometBFT 0.38.5 | Ed25519 | 21 | 10 | Native Cosmos modules only. No `wasm` store, no EVM (checked: `no such store: wasm`) | Light client fits (6.75M). No place for a CLPR Service contract |
 | **Provenance** | CometBFT 0.38.22 | Ed25519 | 100 | 18 | CosmWasm: `wasm` store, key `0x03‖contract(32 B)‖key` | **Covered** by `CosmWasmVerifier` ([../provenance](../provenance/README.md)). Live full bundle in one tx 13.12M; split mode 0.52M + `accumulate` txs |
-| **THORChain** | CometBFT 0.38.19 | Ed25519 | 99 (all power 100) | **67** | CosmWasm `wasm` store (App Layer) | Commit alone is 43.6M gas in one tx. **Fits split**: `CometBftCommitAccumulator` over 4 txs (11.1–11.9M each, live), then `CosmWasmVerifier` by header hash |
+| **THORChain** | CometBFT 0.38.19 | Ed25519 | 99 (all power 100) | **67** | CosmWasm `wasm` store (App Layer; whitelist-only upload, globally halted on 2026-10-01) | Commit alone is 43.6M gas in one tx. **Covered split** ([../thorchain](../thorchain/README.md)): `CometBftCommitAccumulator` over 4 txs (11.1–11.9M each, live), then `CosmWasmVerifier` by header hash, 0.58M (live full bundle) |
 | **Arc** (Circle) | **Malachite** (Tendermint algorithm, not CometBFT) | Ed25519 over **SSZ** votes | 22 (testnet) | 11 | EVM (reth), **MPT**. Validator set is EVM storage of `ValidatorRegistry` at `0x3600…0002` | Live certificate checked off-chain. Different wire format, so a separate adapter (§7) |
 
 "Min. signers" uses the live validator set sorted by power. The relay sends exactly that many
@@ -234,12 +234,8 @@ Cronos node served about 500k blocks of history.
 
 ## 7. Not covered yet (family members to add)
 
-- **Polygon PoS (Bor).** The light client is done: secp256k1eth, verified on a live commit (1.54M
-  gas). Still needed: an ICS-23 proof of a Heimdall milestone in store `milestone`, key
-  `0x81‖count(u64 BE)`, whose `Milestone.hash` (field 4) is the Bor block hash at `end_block`. Then
-  the RLP Bor header (keccak == hash), `stateRoot`, and MPT account and storage proofs, reusing
-  `ClprEvmBundleVerifier`. Checked live on 2026-10-01: the latest milestone (count 0xe336f3) has
-  `end_block` 94,745,706 and `hash = 0x6e7b08db…`, which is that Bor block's hash. Estimated total ≈ 1.5M + 0.3M + MPT ≈ 2.5–3M gas.
+- **Polygon PoS (Bor)**: done, see [../polygon/README.md](../polygon/README.md) (`PolygonPosVerifier`:
+  Heimdall commit → `milestone` store → Bor header → MPT; live full bundle 3.45M gas, rotation 3.45M).
 - **Arc (Malachite).** Votes are `SSZ(Vote{type: u8, height: u64, round: Option<u32>, value:
   Option<B256>, address: [u8;20]})` signed with Ed25519 (`arc-node` `crates/types/src/vote.rs`).
   The address is `keccak256(pubkey)[..20]`, the first 20 bytes. The value is the EVM block hash.
@@ -249,8 +245,9 @@ Cronos node served about 500k blocks of history.
   anchor, SSZ sign bytes, then RLP header → MPT. Testnet needs 11 signatures ≈ 7M gas plus MPT, so
   it fits.
 - **CosmWasm chains** (Provenance, THORChain): covered by `CosmWasmVerifier`
-  ([../provenance](../provenance/README.md)), which fixes the CosmWasm CLPR Service's queue-record
-  layout and sketches the service. No CosmWasm CLPR Service is deployed yet.
+  ([../provenance](../provenance/README.md), [../thorchain](../thorchain/README.md)), which fixes
+  the CosmWasm CLPR Service's queue-record layout and sketches the service. No CosmWasm CLPR
+  Service is deployed yet.
 - **dYdX.** No contract runtime, so a CLPR Service would have to be a native module. The light
   client is ready.
 - **Sei** can move to this contract with a `0x03` profile once its relay emits the compact anchor.

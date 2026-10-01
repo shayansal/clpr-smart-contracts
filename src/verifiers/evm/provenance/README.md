@@ -2,7 +2,8 @@
 
 > **Source**: [CosmWasmVerifier.sol](./CosmWasmVerifier.sol) ·
 > [CometBftCommitAccumulator.sol](../cometbft/CometBftCommitAccumulator.sol) ·
-> light client [CometBftLightClient.sol](../cometbft/CometBftLightClient.sol) (shared with
+> header refs + store proof [CometBftStoreProofBase.sol](../cometbft/CometBftStoreProofBase.sol)
+> (shared with [PolygonPosVerifier](../polygon/README.md)) · light client [CometBftLightClient.sol](../cometbft/CometBftLightClient.sol) (shared with
 > [CometBftVerifier](../cometbft/README.md)) · Ed25519: [Ed25519Verifier](../sei/Ed25519Verifier.sol)
 > **Interface**: [IClprVerifier.sol](../../../interfaces/IClprVerifier.sol)
 
@@ -42,7 +43,7 @@ So the commit and the state proof **fit together in one transaction** today, wit
 spare. An Ed25519 signature costs ~640k, so the one-transaction path holds while the smallest
 power-ordered signer set that clears 2/3 is **≤ 20 validators** (18 today). Above that, or for a
 catch-up across a rotation, the relay splits the commit across transactions with the accumulator
-(§3). Contract sizes: `CosmWasmVerifier` 15,419 B, `CometBftCommitAccumulator` 13,104 B (EIP-170
+(§3). Contract sizes: `CosmWasmVerifier` 15,306 B, `CometBftCommitAccumulator` 13,104 B (EIP-170
 limit 24,576 B).
 
 ## 2. Verification chain
