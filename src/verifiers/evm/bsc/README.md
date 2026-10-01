@@ -17,7 +17,7 @@ It then proves the ClprService queue storage against that state root with the sh
 | Typical bundle | Mainnet, live, no rotation: 1,953,408 gas (`eth_estimateGas`), 23,684 B calldata |
 | Bundle with rotation | Mainnet, live, 1 rotation: 2,439,616 gas, 29,060 B calldata; each further rotation about 0.41-0.52M gas and 5.2 KB |
 | Contract size | `BscParliaVerifier` runtime 22,127 B (2,449 B under EIP-170); deploy 4,817,405 gas |
-| Status | Live-verified on BSC mainnet and Chapel, fixtures captured 2026-10-01. Core, Anubis and BOT Chain: headers and attestations checked, no full bundle run |
+| Status | Live-verified on BSC mainnet, Chapel, BOT Chain mainnet and Core mainnet, fixtures captured 2026-10-01. Anubis: headers and attestations checked, no full bundle run |
 
 ## How it works
 
@@ -178,18 +178,24 @@ and include the 21k base cost and calldata cost. Live fixtures were captured on 
 | Chapel, 1 rotation, live | 1,835,993 | 2,177,714 | 21,732 B |
 | Mainnet (21 validators, 20/21 votes), no rotation, live | 1,574,343 | 1,953,408 | 23,684 B |
 | Mainnet, 1 rotation (set changed), live | 1,986,422 | 2,439,616 | 29,060 B |
+| BOT Chain (7 validators, 7/7 votes), no rotation, live | 947,205 | 1,097,399 | 9,124 B |
+| BOT Chain, 1 rotation (set unchanged), live | 1,288,750 | 1,460,454 | 10,820 B |
+| Core (20 validators, 18/20 votes), no rotation, live | 1,429,957 | 1,745,153 | 19,812 B |
+| Core, 1 rotation (set unchanged), live | 1,794,991 | 2,145,690 | 22,436 B |
 | Synthetic, 21 validators, 0 rotations, 1-node MPT | 662,322 | – | 5,348 B |
 | Synthetic, 21 validators, 4 rotations | 2,407,870 | – | 26,020 B |
 | Synthetic, 21 validators, 16 rotations | 8,981,035 | – | 88,100 B |
 
-- About 0.9M gas of each live bundle is the MPT storage proofs against WBNB's large storage trie (the live probe
-  account, see below). A ClprService trie is far smaller; the synthetic 1-node case shows the floor.
+- About 0.9M gas of each live BSC bundle is the MPT storage proofs against WBNB's large storage trie (the live probe
+  account, see below). The BOT Chain and Core probe accounts (the `0x…1000` ValidatorSet system contract and WCORE)
+  have smaller tries. A ClprService trie is far smaller; the synthetic 1-node case shows the floor.
 - Deploy: 4,817,405 gas. Runtime 22,127 B, 2,449 B under EIP-170.
 
 ## Limits and known gaps
 
 - **No ClprService on BSC yet.** The live fixtures prove the channel slots of WBNB (Chapel `0xae13…a7cd`, mainnet
-  `0xbb4c…095c`), where they are absent, so the storage proofs are MPT exclusion proofs. Header, attestation, rotation
+  `0xbb4c…095c`), the BOT Chain ValidatorSet contract (`0x…1000`) and WCORE on Core (`0x4037…404f`), where they are
+  absent, so the storage proofs are MPT exclusion proofs. Header, attestation, rotation
   and account-proof paths are fully live; message-bearing storage is covered by the synthetic tests.
 - **Rotation is sequential**, one epoch per step, and the relayer must rotate before the current set's tenure ends
   (about 7.5 minutes after the next epoch block on BSC).
@@ -198,7 +204,8 @@ and include the 21k base cost and calldata cost. Live fixtures were captured on 
 - An epoch block whose validator has no BLS key (pre-Luban layout) blocks rotation. This does not happen today.
 - At most 64 validators (the `uint64` vote bitset).
 - Public RPCs serve `eth_getProof` only for recent blocks and are flaky. The refresh script uses a state block
-  120 blocks behind the head and retries across endpoints. Production relayers need their own node or an archive
+  120 blocks behind the head (30 on Core) and retries across endpoints. `rpc.coredao.org` prunes state after a few
+  thousand blocks; BOT Chain has a single public RPC. Production relayers need their own node or an archive
   RPC for catch-up.
 
 ## Upgrades and forks
@@ -223,12 +230,14 @@ forge test --match-contract BscParlia -vv
 # Live fixture replay on anvil (deploys the verifier, verifyConfig + verifyBundle on real data)
 npm run test:e2e:bsc-live
 
-# Refresh the live fixtures from public Chapel and mainnet RPCs, then rebuild the Foundry vectors
+# Refresh the live fixtures from public RPCs (one network: --network chapel|mainnet|botchain|core),
+# then rebuild the Foundry vectors
 npm run bsc-live:refresh
+npm run bsc-live:refresh -- --network core
 npx tsx test/e2e/relay/buildBscLiveProof.ts --vectors
 ```
 
-Test counts on this branch: 40 unit, 28 compliance, 6 live-vector and 1 gas test (Foundry), 18 anvil tests.
+Test counts on this branch: 40 unit, 28 compliance, 9 live-vector and 1 gas test (Foundry), 36 anvil tests.
 
 ## Files
 
@@ -239,11 +248,11 @@ Test counts on this branch: 40 unit, 28 compliance, 6 live-vector and 1 gas test
 | `src/verifiers/evm/common/ClprEvmBundleVerifier.sol` | Shared MPT account and channel-storage proofs, bundle content decoding |
 | `test/verifiers/evm/bsc/BscParliaVerifier.t.sol` | Synthetic-chain unit tests, including negative cases |
 | `test/verifiers/evm/bsc/BscParliaFixtures.sol` | Synthetic validator sets, headers and attestations |
-| `test/verifiers/evm/bsc/BscParliaLive.t.sol` | Live Chapel and mainnet vectors |
+| `test/verifiers/evm/bsc/BscParliaLive.t.sol` | Live Chapel, BSC mainnet, BOT Chain and Core vectors |
 | `test/verifiers/evm/bsc/BscParliaGas.t.sol` | Gas and calldata for 0, 1, 4 and 16 rotations |
 | `test/verifiers/compliance/BscParliaComplianceTest.t.sol` | `IClprVerifier` compliance suite |
-| `test/e2e/fixtures/bsc-live/{chapel,mainnet}.json` | Raw RPC captures (headers and `eth_getProof`) |
-| `test/e2e/fixtures/bsc-live/{chapel,mainnet}-vectors.json` | Encoded config, anchors and bundles built from the captures |
+| `test/e2e/fixtures/bsc-live/{chapel,mainnet,botchain,core}.json` | Raw RPC captures (headers and `eth_getProof`) |
+| `test/e2e/fixtures/bsc-live/{chapel,mainnet,botchain,core}-vectors.json` | Encoded config, anchors and bundles built from the captures |
 | `test/e2e/relay/buildBscLiveProof.ts` | Capture (`--refresh`) and bundle builder (`--vectors`) |
 | `test/e2e/tests/verifiers/bsc-live.spec.ts` | Anvil replay of the live fixtures |
 
