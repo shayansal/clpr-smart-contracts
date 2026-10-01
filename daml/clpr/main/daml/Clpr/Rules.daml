@@ -195,8 +195,10 @@ template Confirmation
       do pure ()
 
 -- | Operators are distinct, keys are distinct 20-byte hex, one key per
--- operator, and 1 <= t <= n. A t below a strict majority is allowed but is
--- the deployer's risk; the README recommends t > n/2 (or > 2n/3 for BFT).
+-- operator, and n/2 < t <= n. A strict majority means two quorums always
+-- share an operator, so one epoch cannot attest two different queue heads
+-- unless an operator equivocates. CantonAttestedVerifier enforces the same
+-- rule.
 validOperatorSet : [Party] -> [Text] -> Int -> Bool
 validOperatorSet operators keys t =
   not (null operators)
@@ -204,7 +206,7 @@ validOperatorSet operators keys t =
     && length keys == length operators
     && all (\k -> T.length k == 40 && isHexBytes k) keys
     && unique (map normalizeHex keys)
-    && t >= 1
+    && 2 * t > length operators
     && t <= length operators
 
 -- | Check and archive a quorum for 'action'. Every confirmation must be for
