@@ -35,12 +35,13 @@ import {channelSlots, FIXTURE_DIR, verifyArcCertificate} from "../../relay/build
 ///
 /// The fixtures hold raw public-RPC responses; every proof below is re-derived from them with
 /// relay/cometbft.ts. The production verifier runs unmodified:
-///   - Cronos and Mezo: full `verifyBundle` — real commit (min-power signer subset, real Ed25519
+///   - Cronos, Mezo, MANTRA and Injective: full `verifyBundle` — real commit (min-power signer subset, real Ed25519
 ///     through the pure-Solidity Ed25519Verifier), real ICS-23 multistore + IAVL proofs. No
 ///     ClprService exists on those chains, so the "service" is a real contract (WCRO on Cronos);
 ///     its channel slots are absent → genuine IAVL NON-existence proofs → zeroed metadata. A real
 ///     non-zero slot is checked with an existence proof through the harness.
-///   - Heimdall v2 (secp256k1eth), dYdX, Provenance, THORChain: the light-client step alone
+///     MANTRA and Injective are recorded at a rotation header, so their bundle also returns a new anchor.
+///   - Heimdall v2 (secp256k1eth), dYdX, Provenance, THORChain (+ MANTRA, Injective): the light-client step alone
 ///     (`applyHops` = validator set + header + >2/3 commit), which is also what a validator-set
 ///     rotation costs.
 ///   - Arc (Malachite): certificate signatures re-verified off-chain (different wire format).
@@ -145,7 +146,7 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
 
     // ── EVM-store chains: full verifyBundle ──────────────────────────────────
 
-    for (const name of ["cronos", "mezo"]) {
+    for (const name of ["cronos", "mezo", "mantra", "injective"]) {
         describe(name, () => {
             const fx = load(name);
             const s = sh(fx.raw.commit);
@@ -190,6 +191,9 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
                 expect(metadata.receivedMessageId).toBe(0n);
                 expect(payloads).toEqual([PAYLOAD]);
                 const rotated = s.header.next_validators_hash !== s.header.validators_hash;
+                // MANTRA and Injective fixtures are recorded AT a rotation header (their set hash changes several
+                // times an hour), so this bundle is a real validator-set rotation.
+                if (fx.meta.rotation) expect(rotated).toBe(true);
                 expect(newAnchor).toBe(rotated ? anchor(Buffer.from(s.header.next_validators_hash, "hex"), H + 1n) : "0x");
                 expect(newAnchorId).toBe(newAnchor);
 
@@ -220,6 +224,9 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
                 expect(numbers[0]).toBe(("0x" + fx.existenceSlot.slice(2).padStart(64, "0")) as Hex);
                 expect(values[0]).toBe(toHex(proofs[5].value));
                 if (name === "cronos") expect(Buffer.from(values[0].slice(2, 24), "hex").toString()).toBe("Wrapped CRO");
+                // eth_getStorageAt at the same height, read when the fixture was recorded (see buildCometBftLiveFixture.ts).
+                if (name === "mantra") expect(BigInt(values[0])).toBe(1n);
+                if (name === "injective") expect(BigInt(values[0])).toBe(0x64n);
             });
 
             it("rejects: flipped signature byte", async () => {
@@ -266,7 +273,7 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
 
     // ── Light-client step on chains without an EVM store ────────────────────
 
-    for (const name of ["heimdall", "dydx", "provenance", "thorchain"]) {
+    for (const name of ["heimdall", "dydx", "provenance", "thorchain", "mantra", "injective"]) {
         it(`${name}: live commit verifies through applyHops (= rotation cost), gas per signature`, async () => {
             const fx = load(name);
             const s = sh(fx.raw.commit);
@@ -300,7 +307,7 @@ describe("CometBFT verifier family on live mainnet data (fixture replay)", () =>
                 /* dropping the top signer can make 2/3 unreachable on small sets */
             }
             const enc = encodeSignedHeader(s, v);
-            report[name] = {
+            report[report[name] ? `${name} (commit)` : name] = {
                 validators: v.length, signatures: enc.signerIndices.length, scheme: v[0].scheme,
                 "commit (hop) gas": Number(g.gas), calldata: g.calldata, "gas/extra sig": perSig,
                 "unused sig overhead": Number(g1.gas - g.gas),

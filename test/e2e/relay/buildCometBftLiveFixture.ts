@@ -48,6 +48,11 @@ export interface ChainSpec {
     target?: Hex;
     /** A slot of `target` that is non-zero (existence proof). */
     existenceSlot?: Hex;
+    /**
+     * evm-bundle only: look back up to this many blocks for a ROTATION header R (next_validators_hash !=
+     * validators_hash, same set over R-10..R so the H-5 hop still applies) and record the bundle at R.
+     */
+    rotationSearch?: number;
 }
 
 export const CHAINS: Record<string, ChainSpec> = {
@@ -63,6 +68,23 @@ export const CHAINS: Record<string, ChainSpec> = {
         target: "0x69710c87447405cea8bb088381905ce133e4dd42",
         existenceSlot: "0x00"
     },
+    // RWA profiles. MANTRA: cosmos/evm (MANTRA-Chain/evm v0.6.3-v8-mantra-1) x/vm StoreKey "evm",
+    // KeyPrefixStorage 0x02. Injective: injective-core v1.20.3-safeharbor.2 (last public source)
+    // injective-chain/modules/evm StoreKey "evm", KeyPrefixStorage 0x02. Both store 32-byte words.
+    mantra: {
+        name: "mantra", kind: "evm-bundle", rpc: "https://rpc.mantrachain.io",
+        storeKey: "evm", evmStateKeyPrefix: 0x02,
+        target: "0xe3047710ef6cb36bcf1e58145529778ea7cb5598", // wMANTRA ("Wrapped MANTRA")
+        existenceSlot: "0x00", // non-zero (0x01), equal to eth_getStorageAt at the same height
+        rotationSearch: 3000 // the set hash changes ~7×/h (delegations move voting power)
+    },
+    injective: {
+        name: "injective", kind: "evm-bundle", rpc: "https://injective-rpc.polkachu.com", // sentry.tm.injective.network serves ABCI proofs only ~100 blocks back
+        storeKey: "evm", evmStateKeyPrefix: 0x02,
+        target: "0x0000000088827d2d103ee2d9a6b781773ae03ffb", // wINJ ("Wrapped INJ")
+        existenceSlot: "0x05", // slots 0-4 are zero; slot 5 holds 0x64 (eth_getStorageAt)
+        rotationSearch: 3000 // the set hash changes ~12×/h
+    },
     heimdall: {name: "heimdall", kind: "commit", rpc: "https://polygon-heimdall-rpc.publicnode.com"},
     dydx: {name: "dydx", kind: "commit", rpc: "https://dydx-rpc.publicnode.com"},
     provenance: {name: "provenance", kind: "commit", rpc: "https://rpc.provenance.io"},
@@ -75,9 +97,34 @@ export function channelSlots(channelId: Hex): Hex[] {
     return CHANNEL_OFFSETS.map((o) => ("0x" + ((base + o) % (1n << 256n)).toString(16).padStart(64, "0")) as Hex);
 }
 
+/** Newest rotation header R <= top with an unchanged set over R-10..R (see ChainSpec.rotationSearch). */
+async function findRotation(rpcUrl: string, top: bigint, window: number): Promise<bigint | undefined> {
+    const vh = new Map<bigint, [string, string]>();
+    for (let hi = top; hi > top - BigInt(window); hi -= 20n) {
+        const res = await fetch(`${rpcUrl}/blockchain?minHeight=${hi - 19n}&maxHeight=${hi}`, {signal: AbortSignal.timeout(30_000)});
+        const metas = ((await res.json()) as any).result.block_metas as any[];
+        for (const m of metas) vh.set(BigInt(m.header.height), [m.header.validators_hash, m.header.next_validators_hash]);
+        for (let r = hi; r > hi - 20n; r--) {
+            const cur = vh.get(r);
+            if (!cur || cur[0] === cur[1]) continue;
+            let stable = true;
+            for (let k = r - 10n; k < r && stable; k++) {
+                const x = vh.get(k);
+                if (x === undefined) stable = r - 10n > hi - 20n; // not fetched yet: check next round
+                else if (x[0] !== cur[0]) stable = false;
+            }
+            if (stable && [...Array(10).keys()].every((i) => vh.has(r - 10n + BigInt(i)))) return r;
+        }
+    }
+    return undefined;
+}
+
 async function captureEvmBundle(c: ChainSpec) {
     const st = await fetchStatus(c.rpc);
-    const H = BigInt(st.sync_info.latest_block_height) - 3n;
+    const top = BigInt(st.sync_info.latest_block_height) - 3n;
+    const R = c.rotationSearch ? await findRotation(c.rpc, top, c.rotationSearch) : undefined;
+    if (c.rotationSearch && R === undefined) console.warn(`${c.name}: no rotation header in the last ${c.rotationSearch} blocks`);
+    const H = R ?? top;
     const hopH = H - 5n;
     const [commit, hopCommit, vals, hopVals] = await Promise.all([
         fetchCommit(c.rpc, H), fetchCommit(c.rpc, hopH), fetchValidators(c.rpc, H), fetchValidators(c.rpc, hopH)
@@ -88,7 +135,10 @@ async function captureEvmBundle(c: ChainSpec) {
     const abci = [];
     for (const k of keys) abci.push((await fetchAbciProof(c.rpc, c.storeKey!, k, H - 1n)).json);
     return {
-        meta: {height: H.toString(), hopHeight: hopH.toString(), signers: enc.signerIndices.length, validators: vals.vals.length},
+        meta: {
+            height: H.toString(), hopHeight: hopH.toString(), signers: enc.signerIndices.length, validators: vals.vals.length,
+            rotation: commit.sh.header.next_validators_hash !== commit.sh.header.validators_hash
+        },
         raw: {commit: commit.json, hopCommit: hopCommit.json, validators: vals.json, hopValidators: hopVals.json, abci}
     };
 }
