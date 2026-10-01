@@ -377,6 +377,45 @@ export function encodeBeefyConfig(p: {commits: BeefyCommit[]; relayHeader: Buffe
         paraStateProof: p.paraStateProof.map(toHex), ledgerConfig: toHex(p.ledgerConfig)}]);
 }
 
+// ── GrandpaPalletVerifier (native pallet storage, e.g. Chainflip) ───────────
+
+/// Proposed `pallet-clpr` storage keys (GrandpaPalletVerifier.sol): Queues (Blake2_128Concat H256)
+/// and Service (StorageValue), under the pallet name of the deployment profile.
+export const palletQueueKey = (pallet: Buffer, channelId: Hex): Buffer => {
+    const c = fromHex(channelId);
+    return Buffer.concat([pallet, twox128("Queues"), blake2_128(c), c]);
+};
+export const palletServiceKey = (pallet: Buffer): Buffer => Buffer.concat([pallet, twox128("Service")]);
+/// SCALE QueueRecord (89 B): status u8, three u64 LE, two 32-byte running hashes.
+export function palletQueueRecord(r: {status: number; next: bigint; received: bigint; manifestVersion: bigint; sent: Buffer; receivedHash: Buffer}): Buffer {
+    return Buffer.concat([Buffer.from([r.status]), u64le(r.next), u64le(r.received), u64le(r.manifestVersion), r.sent, r.receivedHash]);
+}
+/// SCALE ServiceRecord (80 B): AccountId32, manifest commitment, config nanos u128 LE.
+export function palletServiceRecord(service: Buffer, commitment: Buffer, nanos: bigint): Buffer {
+    return Buffer.concat([service, commitment, u64le(nanos & ((1n << 64n) - 1n)), u64le(nanos >> 64n)]);
+}
+
+export function encodeGrandpaPalletBundle(p: {steps: GrandpaStep[]; stateProof: Buffer[]; bundleContent?: Buffer; manifestPreimage?: Buffer}): Hex {
+    return encodeAbiParameters([{type: "tuple", components: [
+        {...GRANDPA_STEP, name: "steps"}, {name: "stateProof", type: "bytes[]"},
+        {name: "bundleContent", type: "bytes"}, {name: "manifestPreimage", type: "bytes"}
+    ]}], [{steps: p.steps.map(stepAbi), stateProof: p.stateProof.map(toHex),
+        bundleContent: toHex(p.bundleContent ?? Buffer.alloc(0)), manifestPreimage: toHex(p.manifestPreimage ?? Buffer.alloc(0))}]);
+}
+
+/// GrandpaPalletVerifier.EntryProof (verifyStorageEntry).
+export function encodeGrandpaEntryProof(p: {steps: GrandpaStep[]; stateProof: Buffer[]}): Hex {
+    return encodeAbiParameters([{type: "tuple", components: [{...GRANDPA_STEP, name: "steps"}, {name: "stateProof", type: "bytes[]"}]}],
+        [{steps: p.steps.map(stepAbi), stateProof: p.stateProof.map(toHex)}]);
+}
+
+/// Splits re-packed GRANDPA votes (102-byte entries, sorted) into batches for GrandpaCommitAccumulator.
+export function splitVotes(votes: Buffer, perBatch: number): Buffer[] {
+    const out: Buffer[] = [];
+    for (let o = 0; o < votes.length; o += 102 * perBatch) out.push(votes.subarray(o, Math.min(votes.length, o + 102 * perBatch)));
+    return out;
+}
+
 /// GrandpaVerifier anchor: setId(u64 BE) ‖ authoritiesHash ‖ minHeight(u32 BE).
 export function grandpaAnchor(setId: bigint, authorities: Buffer, minHeight: number): Hex {
     const b = Buffer.alloc(44);

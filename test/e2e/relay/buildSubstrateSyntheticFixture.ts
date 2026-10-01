@@ -13,8 +13,13 @@ import {
     grandpaMessage,
     keccak,
     keysetRoot,
+    palletQueueKey,
+    palletQueueRecord,
+    palletServiceKey,
+    palletServiceRecord,
     paraHeadKey,
     toHex,
+    twox128,
     u32le,
     u64le
 } from "./substrate.js";
@@ -245,6 +250,58 @@ function beefy(evmRoot: Buffer) {
     };
 }
 
+// ── Native pallet (GrandpaPalletVerifier) ────────────────────────────────────
+
+export const PALLET = twox128("Clpr");
+export const PALLET_SERVICE = keccak(Buffer.from("clpr/grandpa-synthetic/pallet-account"));
+export const BAD_LENGTH_CHANNEL: Hex = keccak256(toBytes("clpr/grandpa-synthetic/bad-length"));
+export const BAD_STATUS_CHANNEL: Hex = keccak256(toBytes("clpr/grandpa-synthetic/bad-status"));
+const palletManifest = Buffer.concat([Buffer.from([0x08, 0x01, 0x12, 0x20]), PALLET_SERVICE]);
+
+function palletChain() {
+    const record = palletQueueRecord({status: Number(STATUS_ACTIVE), next: NEXT_MESSAGE_ID, received: RECEIVED_MESSAGE_ID, manifestVersion: 1n, sent: h32("sentRunningHash"), receivedHash: h32("receivedRunningHash")});
+    const entries: [Buffer, Buffer][] = [
+        [palletQueueKey(PALLET, CHANNEL_ID), record],
+        [palletQueueKey(PALLET, BAD_LENGTH_CHANNEL), record.subarray(0, 88)],
+        [palletQueueKey(PALLET, BAD_STATUS_CHANNEL), Buffer.concat([Buffer.from([9]), record.subarray(1)])],
+        [palletServiceKey(PALLET), palletServiceRecord(PALLET_SERVICE, keccak(palletManifest), CONFIG_NANOS)],
+        // Neighbours in other pallets: a Blake2_128Concat map entry and a plain value.
+        [Buffer.concat([twox128("System"), twox128("Account"), Buffer.alloc(16, 0x11), Buffer.alloc(32, 0x22)]), Buffer.alloc(80, 0x33)],
+        [Buffer.concat([twox128("Grandpa"), twox128("CurrentSetId")]), u64le(9n)]
+    ];
+    const trie = buildTrie(entries);
+
+    const set0 = [0, 1, 2, 3], set1 = [4, 5, 6, 7], setW = [12, 13, 14, 15, 16];
+    const auth0 = edSet(set0), auth1 = edSet(set1);
+    // Weighted set: weights 1, 1, 1, 1, 4 (total 8, threshold 6), like Chainflip's one weight-4 authority.
+    const authW = Buffer.concat(setW.map((k, i) => Buffer.concat([Buffer.from(ed25519.getPublicKey(edKey(k))), u64le(i === 4 ? 4n : 1n)])));
+    const round = 7n;
+    const sign = (h: Buffer, n: number, set: number[], setId: bigint, idxs = [0, 1, 2]) =>
+        votes(idxs.map((i) => ({idx: i, key: set[i], target: blake2_256(h), number: n})), round, setId);
+
+    const p200 = header(h32("pallet parent 199"), 200, trie.root);
+    const p220 = header(h32("pallet parent 219"), 220, trie.root, [scheduledChange(auth1, 0)]);
+    const p230 = header(h32("pallet parent 229"), 230, trie.root);
+    const p300 = header(h32("pallet parent 299"), 300, trie.root);
+    return {
+        pallet: toHex(PALLET),
+        service: toHex(PALLET_SERVICE),
+        manifestPreimage: toHex(palletManifest),
+        badLengthChannel: BAD_LENGTH_CHANNEL,
+        badStatusChannel: BAD_STATUS_CHANNEL,
+        root: toHex(trie.root),
+        nodes: trie.nodes.map(toHex),
+        systemAccountKey: toHex(entries[4][0]),
+        currentSetIdKey: toHex(entries[5][0]),
+        authorities: {set0: toHex(auth0), set1: toHex(auth1), setW: toHex(authW)},
+        p200: {header: toHex(p200), votes: toHex(sign(p200, 200, set0, 0n))},
+        p220: {header: toHex(p220), votes: toHex(sign(p220, 220, set0, 0n))},
+        p230: {header: toHex(p230), votes: toHex(sign(p230, 230, set1, 1n))},
+        // Set id 9; one 102-byte vote per authority index, for batching.
+        p300: {header: toHex(p300), hash: toHex(blake2_256(p300)), votesW: [0, 1, 2, 3, 4].map((i) => toHex(sign(p300, 300, setW, 9n, [i])))}
+    };
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 const evm = evmState();
@@ -255,7 +312,8 @@ const fixture = {
     manifestPreimage: toHex(manifestPreimage),
     evm: {root: toHex(evm.trie.root), nodes: evm.trie.nodes.map(toHex), slotNumbers: evm.slots.map(([s]) => s), slotValues: evm.slots.map(([, v]) => toHex(v))},
     grandpa: grandpa(evm.trie.root),
-    beefy: beefy(evm.trie.root)
+    beefy: beefy(evm.trie.root),
+    pallet: palletChain()
 };
 mkdirSync(path.dirname(OUT), {recursive: true});
 writeFileSync(OUT, JSON.stringify(fixture, null, 1) + "\n");
