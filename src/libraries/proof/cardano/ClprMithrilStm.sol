@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
+import {ClprBls12381} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBls12381.sol";
+
 /// @title ClprMithrilStm
 /// @notice On-chain verification of a Mithril stake-based threshold multi-signature (STM) in its
 ///         production "concatenation" proof system, bit-for-bit with mithril-stm 0.12.x
@@ -26,9 +28,9 @@ pragma solidity ^0.8.28;
 ///      than guessing — honest certificates hit it with probability ≈ 2^-100 per index.
 /// @dev Each σ_i and vk_i comes twice: uncompressed (EIP-2537 layout, used by the MSM and pairing
 ///      precompiles, which validate curve and subgroup membership) and as the compressed bytes Mithril
-///      hashes (lottery, aggregation scalars, registration leaf). The verifier binds the two by the
-///      x-coordinate and the compression and infinity flags. It does not decide which of the two
-///      encodings of a point is canonical; that flag is taken as supplied (see the README, "Limits").
+///      hashes (lottery, aggregation scalars, registration leaf). σ_i's encoding must equal the existing
+///      {ClprBls12381.compressG1} of its point byte for byte. vk_i's encoding is bound by x-coordinate and
+///      the compression and infinity flags only (see the README, "Limits").
 library ClprMithrilStm {
     struct Avk {
         bytes32 root;
@@ -516,30 +518,28 @@ library ClprMithrilStm {
         if (!ok) revert PrecompileFailed(MAP_FP_TO_G1);
     }
 
-    /// @notice The 48-byte compressed G1 encoding at `buf[encOff..]` names the EIP-2537 point at
-    ///         `buf[ptOff..ptOff+128]`: compression flag set, infinity flag clear, same x-coordinate, and
-    ///         the point is not the point at infinity. The third flag bit is not interpreted.
+    /// @notice The 48-byte compressed G1 encoding at `buf[encOff..]` is exactly the encoding of the
+    ///         EIP-2537 point at `buf[ptOff..ptOff+128]` (all three flag bits), recomputed with the
+    ///         existing {ClprBls12381.compressG1}. The point at infinity is rejected.
     function bindsG1(bytes memory buf, uint256 ptOff, uint256 encOff) internal pure returns (bool) {
-        uint256 encHi;
-        uint256 encLo;
-        uint256 xHi;
-        uint256 xLo;
-        uint256 yHi;
-        uint256 yLo;
+        bytes memory pt = new bytes(128);
+        bytes32 encHi;
+        bytes16 encLo;
         assembly ("memory-safe") {
-            let q := add(add(buf, 0x20), ptOff)
-            xHi := mload(q) // pad16 ‖ x-top16
-            xLo := mload(add(q, 0x20))
-            yHi := mload(add(q, 0x40))
-            yLo := mload(add(q, 0x60))
+            mcopy(add(pt, 0x20), add(add(buf, 0x20), ptOff), 128)
             let c := add(add(buf, 0x20), encOff)
-            encHi := shr(128, mload(c))
-            encLo := mload(add(c, 0x10))
+            encHi := mload(c)
+            encLo := mload(add(c, 0x20))
         }
-        uint256 flags = encHi >> 125;
-        if (flags & 0x4 == 0 || flags & 0x2 != 0) return false; // compressed, not infinity
-        if (xHi == 0 && xLo == 0 && yHi == 0 && yLo == 0) return false;
-        return (encHi & ((1 << 125) - 1)) == xHi && encLo == xLo;
+        bytes memory enc = ClprBls12381.compressG1(pt);
+        if (uint8(enc[0]) & 0x40 != 0) return false;
+        bytes32 h;
+        bytes16 l;
+        assembly ("memory-safe") {
+            h := mload(add(enc, 0x20))
+            l := mload(add(enc, 0x40))
+        }
+        return h == encHi && l == encLo;
     }
 
     /// @notice The 96-byte compressed G2 encoding (`x.c1 ‖ x.c0`, flags on the first byte) at

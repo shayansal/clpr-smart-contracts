@@ -20,10 +20,10 @@ Every protocol rule below was checked against:
 | Chains covered | Cardano mainnet (`cip34:1-764824073`), preprod (`cip34:0-1`), preview (`cip34:0-2`). Any Cardano network with a Mithril aggregator. |
 | Direction | Cardano → Hiero |
 | Finality source | Mithril certificates: STM concatenation proof (BLS12-381, lottery over stake) of the protocol message, under the epoch's aggregate verification key (AVK) |
-| Trust assumption | The Mithril honest-stake assumption for parameters (k, m, φ_f), over the stake of the pools registered with Mithril in that epoch. Plus the bootstrap AVK, and the encoding gap in [Limits](#limits-and-known-gaps). |
-| Typical bundle | Preprod, live: epoch rotation + CardanoBlocksTransactions certificate + MKMap + block + transaction output, 2,152,124 gas, 5,092 B (anvil) |
-| Rotation | Mainnet, live: epoch rotation + next-epoch certificate, 11,138,556 gas, 79,204 B (anvil). One rotation per 5-day epoch, at most one per mainnet bundle. |
-| Contract sizes | `CardanoMithrilVerifier` 21,278 B; `MithrilStmVerifier` 13,241 B; `ClprBlake2sHasher` 2,108 B |
+| Trust assumption | The Mithril honest-stake assumption for parameters (k, m, φ_f), over the stake of the pools registered with Mithril in that epoch. Plus the bootstrap AVK, and the key-encoding gap in [Limits](#limits-and-known-gaps). |
+| Typical bundle | Preprod, live: epoch rotation + CardanoBlocksTransactions certificate + MKMap + block + transaction output, 2,153,379 gas, 5,092 B (anvil) |
+| Rotation | Mainnet, live: epoch rotation + next-epoch certificate, 11,218,993 gas, 79,204 B (anvil). One rotation per 5-day epoch, at most one per mainnet bundle. |
+| Contract sizes | `CardanoMithrilVerifier` 21,278 B; `MithrilStmVerifier` 13,586 B; `ClprBlake2sHasher` 2,108 B |
 | Status | Live-verified on preprod (certificates, rotation, full transaction-output path) and mainnet (certificates, rotation), fixtures captured 2026-10-01. Mainnet bundles are blocked: mainnet does not sign `CardanoBlocksTransactions` yet. |
 
 **Family coverage.** Mithril is Cardano-specific. The verifier serves every Cardano network whose Mithril
@@ -157,7 +157,7 @@ What is trusted:
   committee verifiers. Mithril's own genesis-key certificate chain is not used.
 - **φ_f is fixed at bootstrap.** A rotation that changes it reverts (`PhiFChanged`) and the channel must be
   bootstrapped again. k and m may change.
-- **The encoding gap.** See [Limits and known gaps](#limits-and-known-gaps).
+- **The key-encoding gap.** See [Limits and known gaps](#limits-and-known-gaps).
 
 What is not trusted:
 
@@ -194,8 +194,9 @@ uses. `initialTrustAnchorId` / `newTrustAnchorId` = the epoch (8 bytes).
 `cert` = `[keyIds[], values[], signers[], batchValues]`. Each signer entry is
 `σ (G1, 128) ‖ vk (G2, 256) ‖ σ compressed (48) ‖ vk compressed (96) ‖ stake u64 ‖ leafIndex u32 ‖ indexes u32…`.
 The uncompressed points go to the EIP-2537 precompiles, which check curve and subgroup membership. The
-compressed bytes are what Mithril hashes. `ClprMithrilStm.sol:bindsG1`/`bindsG2` require both forms to have
-the same x-coordinate and the compression flag set.
+compressed bytes are what Mithril hashes. `ClprMithrilStm.sol:bindsG1` recomputes σ's encoding with the
+existing `ClprBls12381.compressG1` and requires it byte for byte, all three flag bits included.
+`bindsG2` binds vk's encoding by x-coordinate and the compression and infinity flags.
 
 **Config** (RLP, 11 items): `[epoch, avkRoot, nrLeaves, totalStake, k, m, phiU8F24, lnMant, lnExpNeg, cert,
 ledgerConfiguration]`. The chain id must start with `cip34:`. The service address is the 28-byte script hash.
@@ -208,8 +209,8 @@ ledgerConfiguration]`. The chain id must start with `cip34:`. The service addres
 The Mithril signer set and stake distribution change every Cardano epoch (5 days). A certificate of epoch e
 signs `next_aggregate_verification_key` and `next_protocol_parameters` for e + 1
 (`verify_*_chaining`). The verifier accepts up to 8 rotation certificates per bundle. On mainnet one certificate
-costs about 5.5M gas (5,546,906 measured), so a bundle fits one rotation plus its state certificate
-(11,138,556 gas, 79,204 B). Catching up n epochs on mainnet therefore takes n bundles. On preprod a bundle can
+costs about 5.5M gas (5,585,779 measured), so a bundle fits one rotation plus its state certificate
+(11,218,993 gas, 79,204 B). Catching up n epochs on mainnet therefore takes n bundles. On preprod a bundle can
 carry all 8. The aggregator serves the whole certificate chain, so old certificates stay available and
 catch-up has no time limit.
 
@@ -220,9 +221,9 @@ Measured with `eth_estimateGas` on anvil (`npm run test:e2e:cardano-live`), live
 
 | Case | Gas | Calldata | Fits |
 |---|---|---|---|
-| Preprod: rotation (epoch 315 → 316) + CardanoBlocksTransactions certificate + MKMap + block + transaction output | 2,152,124 | 5,092 B | yes |
-| Mainnet: one certificate (epoch 658; 57 signatures, 1,946 lottery indexes) | 5,546,906 | 38,724 B | yes |
-| Mainnet: rotation (657 → 658) + certificate | 11,138,556 | 79,204 B | yes |
+| Preprod: rotation (epoch 315 → 316) + CardanoBlocksTransactions certificate + MKMap + block + transaction output | 2,153,379 | 5,092 B | yes |
+| Mainnet: one certificate (epoch 658; 57 signatures, 1,946 lottery indexes) | 5,585,779 | 38,724 B | yes |
+| Mainnet: rotation (657 → 658) + certificate | 11,218,993 | 79,204 B | yes |
 
 On mainnet, the certificate dominates: the lottery (two BLAKE2F calls per index, about 1.6k gas) and the G2
 MSM over the signatures. BLAKE2s-256 has no precompile and costs about 36k gas per 64-byte block. The CLPR
@@ -236,13 +237,14 @@ run in the synthetic Foundry tests.
   (checked on the aggregator's capabilities, 2026-10-01). `CardanoTransactions` leaves are bare transaction
   ids, without the block hash needed to prove phase-2 validity. Mainnet certificates and rotations verify
   today. Bundles need Mithril to enable `CardanoBlocksTransactions` on mainnet. Preprod and preview have it.
-- **Encoding gap.** For each signature the verifier binds the relayer-supplied point to the compressed
-  encoding Mithril hashes by x-coordinate and flags. It does not decide which of the two points with that
-  x-coordinate the third flag bit names; the bit is taken as supplied. The lottery hashes the compressed
-  bytes, so a relayer can present each real signature under two encodings. That at most doubles the
-  lottery wins one signature yields, so an attacker needs up to about half the stake that (k, m, φ_f)
-  assume. Real signatures are still required and the BLS check is unaffected. This must be closed before
-  production use.
+- **Key-encoding gap.** Each signature's compressed bytes must equal the on-chain encoding of its point,
+  so one signature point has one lottery encoding (`test_rejects_sameSignatureOtherFlagEncoding`). The
+  key's compressed bytes are fixed by the registration leaf, but the relayer-supplied key point is bound
+  only by x-coordinate and flags, because the repository has no G2 encoder. A relayer can therefore supply
+  the negated key together with the negated signature. That pair passes the BLS check, and the negated
+  signature has its own encoding, so each real signature can still reach the lottery twice. This at most
+  doubles one signature's lottery wins. Real signatures are still required. Closing it needs a G2 encoder
+  that the repository's BLS rules allow.
 - **No CLPR Plutus script exists yet.** The datum layout above is this verifier's proposal. The live tests
   prove real outputs of other scripts with the generic entry points (`verifyTransactionOutput`,
   `verifyCertificate`).

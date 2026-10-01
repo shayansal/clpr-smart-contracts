@@ -105,6 +105,17 @@ contract CardanoMithrilVerifierTest is Test, CardanoTestKit {
         this.callBundle(proof_, anchor_);
     }
 
+    function test_rejects_sameSignatureOtherFlagEncoding() public {
+        // the signature's compressed bytes (hashed by the lottery) with the third flag bit flipped: same
+        // point, other encoding — must not be accepted as a second lottery presentation
+        bytes memory proof_ = _encode(_bundle(defaultQueue()));
+        uint256 at = _find(proof_, encG2(netA.vks[0])) - 48; // σ compressed precedes vk compressed
+        proof_[at] ^= 0x20;
+        bytes memory anchor_ = _anchor(netA);
+        vm.expectRevert(abi.encodeWithSelector(ClprMithrilStm.EncodingMismatch.selector, 0));
+        this.callBundle(proof_, anchor_);
+    }
+
     function _find(bytes memory hay, bytes memory needle) internal pure returns (uint256) {
         for (uint256 i = 0; i + needle.length <= hay.length; i++) {
             bool ok = true;

@@ -12,9 +12,9 @@ Design, trust model and gas are in the family README:
 | Chain type | L1, Ouroboros Praos proof-of-stake |
 | Finality source | Mithril certificates (stake-based threshold multi-signature by registered stake pools), not Ouroboros itself |
 | Verifier | `CardanoMithrilVerifier` + `MithrilStmVerifier` + `ClprBlake2sHasher` |
-| Trust tier | Mithril honest-stake assumption for (k, m, φ_f) over Mithril-registered stake. Plus the bootstrap AVK, and the open encoding gap (family README, Limits). |
-| Typical bundle | Preprod, live: 2,152,124 gas, 5,092 B (with one epoch rotation) |
-| Rotation | Every epoch (5 days). Mainnet, live: rotation + certificate 11,138,556 gas, 79,204 B. |
+| Trust tier | Mithril honest-stake assumption for (k, m, φ_f) over Mithril-registered stake. Plus the bootstrap AVK, and the open key-encoding gap (family README, Limits). |
+| Typical bundle | Preprod, live: 2,153,379 gas, 5,092 B (with one epoch rotation) |
+| Rotation | Every epoch (5 days). Mainnet, live: rotation + certificate 11,218,993 gas, 79,204 B. |
 
 ## Deployment profile
 
@@ -46,8 +46,8 @@ covered by the same profile. It was not live-verified here.
 - Mithril's stake base is the pools registered with Mithril in the epoch, not all Cardano stake.
 - Mithril certifies data a block-number offset behind the tip (100 blocks on preprod), so bundles lag the tip
   by at least that much.
-- The compressed-encoding flag of each signature is taken as supplied (family README, Limits). This must be
-  closed before production.
+- Signature encodings are checked byte for byte. Key points are bound only by x-coordinate and flags,
+  which leaves one joint-negation case open (family README, Limits).
 - Plutus script hashes are immutable, so the CLPR script cannot change under a channel.
 
 ## Live verification

@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
+import {ClprBls12381} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBls12381.sol";
 import {ClprBlake2} from "@hiero-ledger/clpr/libraries/proof/cardano/ClprBlake2.sol";
 import {ClprMithrilStm} from "@hiero-ledger/clpr/libraries/proof/cardano/ClprMithrilStm.sol";
 import {ClprMithrilMessage} from "@hiero-ledger/clpr/libraries/proof/cardano/ClprMithrilMessage.sol";
@@ -255,18 +256,13 @@ contract CardanoTestKit {
         return abi.encodePacked(sigma, net.vks[i], enc, net.stakes[i], uint32(i), won);
     }
 
-    /// @dev Compressed encoding of an EIP-2537 G1 point as the synthetic worlds use it: compression flag
-    ///      and x-coordinate. The verifier binds encodings by x and flags only, so the synthetic worlds
-    ///      leave the third flag bit clear for every point.
-    function encG1(bytes memory pt) internal pure returns (bytes memory out) {
-        out = new bytes(48);
-        assembly ("memory-safe") {
-            mcopy(add(out, 0x20), add(pt, 0x30), 48)
-        }
-        out[0] = bytes1(uint8(out[0]) | 0x80);
+    /// @dev Compressed G1 encoding, from the existing {ClprBls12381.compressG1}.
+    function encG1(bytes memory pt) internal pure returns (bytes memory) {
+        return ClprBls12381.compressG1(pt);
     }
 
-    /// @dev Compressed G2 encoding `x.c1 ‖ x.c0` with the compression flag (see {encG1}).
+    /// @dev Compressed G2 encoding `x.c1 ‖ x.c0` with the compression flag. The verifier binds key
+    ///      encodings by x-coordinate and flags only, so the third flag bit is left clear.
     function encG2(bytes memory pt) internal pure returns (bytes memory out) {
         out = new bytes(96);
         assembly ("memory-safe") {
