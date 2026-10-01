@@ -99,7 +99,7 @@ contract XrplLightClient {
         Memory.Slice[] memory p = RLP.decodeList(proof);
         if (p.length < 5) revert InvalidPayloadShape();
         Unl memory unl;
-        (unl.masters, unl.signers, unl.seqs) = UNL_KEYS.configUnl(RLP.readBytes(p[0]));
+        (unl.masters, unl.signers, unl.seqs) = UNL_KEYS.configUnl(proof);
         XrplLib.Header memory hd = XrplLib.parseHeader(RLP.readBytes(p[1]));
         _requireQuorum(unl, RLP.readList(p[2]), hd);
         bytes32 key = ClprSha512.half(abi.encodePacked(uint16(0x0061), account)); // keylet::account
@@ -135,8 +135,13 @@ contract XrplLightClient {
     {
         Unl memory unl = _decodeUnl(p[0], unlHash, unlCount);
         bool rotated;
-        if (RLP.readList(p[1]).length > 0) {
-            (unl.signers, unl.seqs) = UNL_KEYS.applyManifests(unl.masters, unl.signers, unl.seqs, RLP.readBytes(p[1]));
+        Memory.Slice[] memory manifests = RLP.readList(p[1]);
+        if (manifests.length > 0) {
+            bytes[] memory blobs = new bytes[](manifests.length);
+            for (uint256 k = 0; k < manifests.length; ++k) {
+                blobs[k] = RLP.readBytes(manifests[k]);
+            }
+            (unl.signers, unl.seqs) = UNL_KEYS.applyManifests(unl.masters, unl.signers, unl.seqs, blobs);
             rotated = true;
         }
         XrplLib.Header memory hd = XrplLib.parseHeader(RLP.readBytes(p[2]));
@@ -190,8 +195,8 @@ contract XrplLightClient {
 
     /// @dev Roots of the validated ledger's transaction tree and of each linked ancestor's. An
     ///      ancestor entry is [header] (the parent of the previous header) or
-    ///      [header, [inner(512), ...], skipListData]: a header whose hash is in the validated
-    ///      ledger's LedgerHashes skip list (keylet::skip(), the last 256 ledger hashes, maintained by
+    ///      [header, [inner(512), ...], skipListData] / [header, ""]: a header whose hash is in the
+    ///      validated ledger's LedgerHashes skip list (proven once, by the first such entry) (keylet::skip(), the last 256 ledger hashes, maintained by
     ///      `Ledger::updateSkipList`), proven in its state tree. Later [header] entries continue from
     ///      the last linked header.
     function _txRoots(XrplLib.Header memory hd, Memory.Slice[] memory ancestors)
@@ -202,16 +207,24 @@ contract XrplLightClient {
         roots = new bytes32[](ancestors.length + 1);
         roots[0] = hd.txHash;
         bytes32 parent = hd.parentHash;
+        bytes memory skip;
         for (uint256 k = 0; k < ancestors.length; ++k) {
             Memory.Slice[] memory e = RLP.readList(ancestors[k]);
-            if (e.length != 1 && e.length != 3) revert InvalidPayloadShape();
+            if (e.length == 0 || e.length > 3) revert InvalidPayloadShape();
             XrplLib.Header memory h = XrplLib.parseHeader(RLP.readBytes(e[0]));
             if (e.length == 1) {
                 if (h.hash != parent) revert AncestorMismatch(k);
             } else {
-                if (UNL_KEYS.skipListHash(hd.accountHash, _blobs(e[1]), RLP.readBytes(e[2]), h.seq) != h.hash) {
-                    revert AncestorMismatch(k);
+                bytes32 listed;
+                if (e.length == 3) {
+                    // first skip-linked entry: prove the skip list once, keep it for the next ones
+                    skip = RLP.readBytes(e[2]);
+                    listed = UNL_KEYS.skipListHash(hd.accountHash, _blobs(e[1]), skip, h.seq);
+                } else {
+                    if (skip.length == 0) revert AncestorMismatch(k);
+                    listed = UNL_KEYS.skipListLookup(skip, h.seq);
                 }
+                if (listed != h.hash) revert AncestorMismatch(k);
             }
             roots[k + 1] = h.txHash;
             parent = h.parentHash;

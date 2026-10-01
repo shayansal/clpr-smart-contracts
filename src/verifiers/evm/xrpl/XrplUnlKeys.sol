@@ -28,13 +28,15 @@ contract XrplUnlKeys {
         ED25519 = ed25519;
     }
 
-    /// @notice Config-time UNL: RLP [[masterKey(33), compressedSigningKey(33), manifestSeq], ...].
-    function configUnl(bytes calldata unlRlp)
+    /// @notice Config-time UNL, field 0 of `proof`: [[masterKey(33), compressedSigningKey(33), manifestSeq], ...].
+    function configUnl(bytes calldata proof)
         external
         view
         returns (bytes[] memory masters, address[] memory signers, uint32[] memory seqs)
     {
-        Memory.Slice[] memory list = RLP.decodeList(unlRlp);
+        Memory.Slice[] memory top = RLP.decodeList(proof);
+        if (top.length == 0) revert InvalidPayloadShape();
+        Memory.Slice[] memory list = RLP.readList(top[0]);
         uint256 n = list.length;
         if (n == 0) revert EmptyUnl();
         masters = new bytes[](n);
@@ -50,18 +52,17 @@ contract XrplUnlKeys {
         }
     }
 
-    /// @notice Apply manifests (RLP list of serialized manifests) in order: the master key signs,
+    /// @notice Apply serialized manifests in order: the master key signs,
     ///         the new ephemeral key countersigns, and the sequence must increase. The new key must be
     ///         secp256k1 because rippled only accepts secp256k1 validation keys (STValidation.h).
     function applyManifests(
         bytes[] memory masters,
         address[] memory signers,
         uint32[] memory seqs,
-        bytes calldata manifestsRlp
+        bytes[] calldata manifests
     ) external view returns (address[] memory, uint32[] memory) {
-        Memory.Slice[] memory manifests = RLP.decodeList(manifestsRlp);
         for (uint256 k = 0; k < manifests.length; ++k) {
-            XrplLib.Manifest memory m = XrplLib.parseManifest(RLP.readBytes(manifests[k]));
+            XrplLib.Manifest memory m = XrplLib.parseManifest(manifests[k]);
             uint256 idx = type(uint256).max;
             for (uint256 j = 0; j < masters.length; ++j) {
                 if (keccak256(masters[j]) == keccak256(m.master)) {
@@ -97,6 +98,11 @@ contract XrplUnlKeys {
         returns (bytes32)
     {
         XrplLib.verifyPath(root, SKIP_KEY, inners, XrplLib.stateLeafHash(entry, SKIP_KEY));
+        return XrplLib.skipListHash(entry, seq);
+    }
+
+    /// @notice Lookup in a skip list the caller has already proven with {skipListHash}.
+    function skipListLookup(bytes memory entry, uint32 seq) external pure returns (bytes32) {
         return XrplLib.skipListHash(entry, seq);
     }
 
