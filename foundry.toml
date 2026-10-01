@@ -31,6 +31,7 @@ fs_permissions = [
     { access = "read", path = "test/verifiers" },
     { access = "read", path = "test/e2e/fixtures/near-live" },
     { access = "read", path = "test/e2e/fixtures/ton-live" },
+    { access = "read", path = "test/e2e/fixtures/aurora-live" },
 ]
 [profile.default.fuzz]
 runs = 256

@@ -9,7 +9,7 @@ import {NearVerifier} from "@hiero-ledger/clpr/verifiers/evm/neartons/NearVerifi
 import {NearLightClient} from "@hiero-ledger/clpr/libraries/proof/near/NearLightClient.sol";
 
 /// @notice NearVerifier against real NEAR mainnet and testnet data
-///         (test/e2e/fixtures/near-live, re-record with `npm run near-live:refresh`).
+///         (test/e2e/fixtures/near-live, re-record with `npm run neartons-live:refresh`).
 contract NearLiveTest is Test {
     Ed25519Verifier internal ed;
     ClprEd25519SignatureCache internal cache;

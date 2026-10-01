@@ -139,13 +139,31 @@ export function merklize(items: Buffer[]): Buffer {
 
 /// From the RPC's unordered proof set, return the nodes on the path to `key`, root first.
 export function triePath(root: Buffer, key: Buffer, proof: Buffer[], known?: Buffer): {nodes: Buffer[]; value: Buffer} {
+    const r = trieProve(root, key, proof, known ? [known] : []);
+    if (!r.value) throw new Error("trie: absent");
+    return {nodes: r.nodes, value: r.value};
+}
+
+/// The path to `key`, root first: ending at its value (`value` set) or where the key leaves the trie
+/// (`value` null: an exclusion proof). `values` are value preimages served beside the proof.
+export function trieProve(
+    root: Buffer,
+    key: Buffer,
+    proof: Buffer[],
+    values: Buffer[] = [],
+): {nodes: Buffer[]; value: Buffer | null} {
     const byHash = new Map(proof.map((p) => [sha256(p).toString("hex"), p]));
-    if (known) byHash.set(sha256(known).toString("hex"), known);
+    for (const v of values) byHash.set(sha256(v).toString("hex"), v);
     const nib = (i: number) => (i % 2 === 0 ? key[i >> 1] >> 4 : key[i >> 1] & 15);
     const total = key.length * 2;
     let pos = 0;
     let h = root;
     const nodes: Buffer[] = [];
+    const valueOf = (ref: Buffer) => {
+        const v = byHash.get(ref.toString("hex"));
+        if (!v) throw new Error("trie: missing value");
+        return v;
+    };
     for (;;) {
         const n = byHash.get(h.toString("hex"));
         if (!n) throw new Error("trie: missing node");
@@ -157,13 +175,11 @@ export function triePath(root: Buffer, key: Buffer, proof: Buffer[], known?: Buf
             const odd = (enc[0] & 0x10) !== 0;
             const path: number[] = odd ? [enc[0] & 15] : [];
             for (let j = 1; j < enc.length; j++) path.push(enc[j] >> 4, enc[j] & 15);
-            for (const x of path) if (nib(pos++) !== x) throw new Error("trie: key mismatch");
+            if (pos + path.length > total) return {nodes, value: null};
+            for (const x of path) if (nib(pos++) !== x) return {nodes, value: null};
             if (tag === 0) {
-                if (pos !== total) throw new Error("trie: leaf key length");
-                const vh = n.subarray(5 + len + 4, 5 + len + 36);
-                const value = byHash.get(vh.toString("hex"));
-                if (!value) throw new Error("trie: missing value");
-                return {nodes, value};
+                if (pos !== total) return {nodes, value: null};
+                return {nodes, value: valueOf(n.subarray(5 + len + 4, 5 + len + 36))};
             }
             h = n.subarray(5 + len, 5 + len + 32);
         } else {
@@ -172,14 +188,9 @@ export function triePath(root: Buffer, key: Buffer, proof: Buffer[], known?: Buf
             if (tag === 2) off += 36;
             const bitmap = n.readUInt16LE(off);
             off += 2;
-            if (pos === total) {
-                if (!vref) throw new Error("trie: no value at branch");
-                const value = byHash.get(vref.subarray(4).toString("hex"));
-                if (!value) throw new Error("trie: missing value");
-                return {nodes, value};
-            }
+            if (pos === total) return {nodes, value: vref ? valueOf(vref.subarray(4)) : null};
             const c = nib(pos++);
-            if (!((bitmap >> c) & 1)) throw new Error("trie: absent");
+            if (!((bitmap >> c) & 1)) return {nodes, value: null};
             let k = 0;
             for (let j = 0; j < c; j++) if ((bitmap >> j) & 1) k++;
             h = n.subarray(off + 32 * k, off + 32 * k + 32);
@@ -226,30 +237,22 @@ async function rpc(url: string, method: string, params: unknown): Promise<any> {
     }
 }
 
-export async function captureNear(network: string): Promise<NearCapture> {
-    const t = NEAR_TARGETS[network];
-    const head = await rpc(t.rpc, "block", {finality: "final"});
-    const lc: LightClientBlockView = await rpc(t.rpc, "next_light_client_block", {last_block_hash: head.header.hash});
-    const vinfo = await rpc(t.rpc, "validators", {epoch_id: lc.inner_lite.epoch_id});
-    const prevLast = await rpc(t.rpc, "block", {block_id: vinfo.epoch_start_height - 1});
+/// The light-client half of a capture: everything except the contract `view_state`.
+export type NearLightClientCapture = Pick<
+    NearCapture,
+    "lc" | "lcBlockHashRpc" | "producersPrev" | "producersCur" | "prevEpochLastBlock" | "chunkPrevStateRoots"
+>;
+
+export async function captureLightClient(url: string): Promise<NearLightClientCapture> {
+    const head = await rpc(url, "block", {finality: "final"});
+    const lc: LightClientBlockView = await rpc(url, "next_light_client_block", {last_block_hash: head.header.hash});
+    const vinfo = await rpc(url, "validators", {epoch_id: lc.inner_lite.epoch_id});
+    const prevLast = await rpc(url, "block", {block_id: vinfo.epoch_start_height - 1});
     if (prevLast.header.next_epoch_id !== lc.inner_lite.epoch_id) throw new Error("epoch boundary mismatch");
-    const producersCur = await rpc(t.rpc, "EXPERIMENTAL_validators_ordered", {block_id: lc.inner_lite.height});
-    const producersPrev = await rpc(t.rpc, "EXPERIMENTAL_validators_ordered", {block_id: prevLast.header.height});
-    const lcBlock = await rpc(t.rpc, "block", {block_id: lc.inner_lite.height});
-    const viewState = await rpc(t.rpc, "query", {
-        request_type: "view_state",
-        block_id: lc.prev_block_hash,
-        account_id: t.account,
-        prefix_base64: Buffer.from(t.key).toString("base64"),
-        include_proof: true,
-    });
+    const producersCur = await rpc(url, "EXPERIMENTAL_validators_ordered", {block_id: lc.inner_lite.height});
+    const producersPrev = await rpc(url, "EXPERIMENTAL_validators_ordered", {block_id: prevLast.header.height});
+    const lcBlock = await rpc(url, "block", {block_id: lc.inner_lite.height});
     return {
-        network,
-        capturedAt: new Date().toISOString(),
-        rpc: t.rpc,
-        account: t.account,
-        key: t.key,
-        chainId: t.chainId,
         lc,
         lcBlockHashRpc: lcBlock.header.hash,
         producersPrev,
@@ -262,7 +265,35 @@ export async function captureNear(network: string): Promise<NearCapture> {
             next_bp_hash: prevLast.header.next_bp_hash,
         },
         chunkPrevStateRoots: lcBlock.chunks.map((c: {prev_state_root: string}) => c.prev_state_root),
-        viewState: {block_hash: viewState.block_hash, proof: viewState.proof, values: viewState.values},
+    };
+}
+
+/// `view_state` with a proof, at the light-client block's parent: its post-state root is the chunk
+/// `prev_state_root` the light-client block commits to.
+export async function viewStateProof(url: string, lc: LightClientBlockView, account: string, prefix: Buffer) {
+    const r = await rpc(url, "query", {
+        request_type: "view_state",
+        block_id: lc.prev_block_hash,
+        account_id: account,
+        prefix_base64: prefix.toString("base64"),
+        include_proof: true,
+    });
+    return {block_hash: r.block_hash as string, proof: r.proof as string[], values: r.values as {key: string; value: string}[]};
+}
+
+export async function captureNear(network: string): Promise<NearCapture> {
+    const t = NEAR_TARGETS[network];
+    const lcc = await captureLightClient(t.rpc);
+    const viewState = await viewStateProof(t.rpc, lcc.lc, t.account, Buffer.from(t.key));
+    return {
+        network,
+        capturedAt: new Date().toISOString(),
+        rpc: t.rpc,
+        account: t.account,
+        key: t.key,
+        chainId: t.chainId,
+        ...lcc,
+        viewState,
     };
 }
 
@@ -358,7 +389,23 @@ export interface NearLiveProof {
     meta: {producers: number; signedProducers: number; chosenSigners: number; shards: number; shardIndex: number; trieDepth: number};
 }
 
-export function buildNearLiveProof(c: NearCapture): NearLiveProof {
+export interface NearLightClientPart {
+    anchorPrev: Buffer;
+    anchorCur: Buffer;
+    bpPrev: Buffer;
+    bpCur: Buffer;
+    msg: Buffer;
+    chosen: number[];
+    signedCount: number;
+    sigOf: (i: number) => Buffer;
+    block: NearBlockArg;
+    blockCached: NearBlockArg;
+    roots: Buffer[];
+    bh: Buffer;
+}
+
+/// Light-client block, anchors, the > 2/3-stake signer choice and the shard roots of a capture.
+export function buildLightClientPart(c: NearLightClientCapture): NearLightClientPart {
     const lc = c.lc;
     // Block hash recomputed from the light-client view must equal the RPC block hash.
     const bh = lcBlockHash(lc);
@@ -409,6 +456,13 @@ export function buildNearLiveProof(c: NearCapture): NearLiveProof {
     // State root: chunk prev_state_roots merklize to inner_lite.prev_state_root.
     const roots = c.chunkPrevStateRoots.map(b32);
     if (!merklize(roots).equals(b32(lc.inner_lite.prev_state_root))) throw new Error("state root merklize mismatch");
+    return {anchorPrev, anchorCur, bpPrev, bpCur, msg, chosen, signedCount: signed.length, sigOf, block, blockCached, roots, bh};
+}
+
+export function buildNearLiveProof(c: NearCapture): NearLiveProof {
+    const lc = c.lc;
+    const {anchorPrev, anchorCur, bpPrev, bpCur, msg, chosen, signedCount, sigOf, block, blockCached, roots, bh} =
+        buildLightClientPart(c);
     const proof = c.viewState.proof.map((p) => Buffer.from(p, "base64"));
     const rootSet = new Set(proof.map((p) => sha256(p).toString("hex")));
     const shardIndex = roots.findIndex((r) => rootSet.has(r.toString("hex")));
@@ -450,7 +504,7 @@ export function buildNearLiveProof(c: NearCapture): NearLiveProof {
         height: lc.inner_lite.height,
         meta: {
             producers: c.producersCur.length,
-            signedProducers: signed.length,
+            signedProducers: signedCount,
             chosenSigners: chosen.length,
             shards: roots.length,
             shardIndex,
