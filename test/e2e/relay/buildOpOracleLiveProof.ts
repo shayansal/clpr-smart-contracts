@@ -49,11 +49,15 @@ import {
 /// CLI:
 ///   npx tsx test/e2e/relay/buildOpOracleLiveProof.ts                     build from the fixture, print a summary
 ///   npx tsx test/e2e/relay/buildOpOracleLiveProof.ts --refresh [--wait-nonsigners SECS]
+///   npx tsx test/e2e/relay/buildOpOracleLiveProof.ts --set fraxtal [--refresh]
+///
+/// Fixture sets: `opadapters` (default: blast, mantle, katana → fixtures/opadapters-live, Forge export
+/// with the oracle and L2 items only) and `fraxtal` (fraxtal → fixtures/fraxtal-live, Forge export with
+/// the real light-client proof and trust anchor, replayed as is by OpOutputOracleFraxtalLive).
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const OPADAPTERS_FIXTURE_DIR = path.resolve(__dirname, "../fixtures/opadapters-live");
 export const OPADAPTERS_LIVE_FIXTURE = path.join(OPADAPTERS_FIXTURE_DIR, "capture.json");
-const PENDING_DIR = path.join(OPADAPTERS_FIXTURE_DIR, "pending");
 /// Forge-readable export of the built proofs (the Foundry tests sign the real L1 state root with a
 /// generator committee and replay these real oracle and L2 proofs through the real verifiers).
 export const OPADAPTERS_FORGE_FIXTURE = path.resolve(__dirname, "../../verifiers/evm/opstack/oracle/fixtures/live.json");
@@ -64,7 +68,7 @@ export const L1_SECONDS_PER_SLOT = 12n;
 /// L2ToL1MessagePasser predeploy: a real contract with real code and storage on every chain here.
 export const L2_ACCOUNT: Hex = "0x4200000000000000000000000000000000000016";
 
-export type ChainName = "blast" | "mantle" | "katana";
+export type ChainName = "blast" | "mantle" | "katana" | "fraxtal";
 
 export interface OracleChain {
     name: ChainName;
@@ -140,10 +144,49 @@ export const ORACLE_CHAINS: Record<ChainName, OracleChain> = {
             fn: "function rollupIDToRollupDataV2(uint32) view returns (address,uint64,address,uint64,bytes32,uint64,uint64,uint64,uint64,uint8,bytes32,bytes32)",
             args: [20]
         }
+    },
+    fraxtal: {
+        name: "fraxtal",
+        l2ChainId: 252,
+        oracle: "0x66CC916Ed5C6C2FA97014f7D1cD141528Ae171e4",
+        // L2OutputOracle 1.8.0: _initialized|_initializing, startingBlockNumber, startingTimestamp, l2Outputs (3),
+        // submissionInterval, l2BlockTime, challenger, proposer, finalizationPeriodSeconds (8).
+        outputsSlot: 3n,
+        periodSource: PERIOD_SOURCE.STORAGE,
+        finalizationPeriodSlot: 8n,
+        hasOptimisticMode: false,
+        optimisticModeSlot: 0n,
+        optimisticModeOffset: 0n,
+        periodGetter: null,
+        accountFormat: ETH_ACCOUNT,
+        withdrawalsRootIsMessagePasser: true, // Isthmus: checked against eth_getProof by every capture
+        l2Rpcs: ["https://rpc.frax.com"],
+        binding: {to: "0x36cb65c1967A0Fb0EEE11569C51C2f2aA1Ca6f6D", fn: "function l2Oracle() view returns (address)", args: []}
     }
 };
 
+/// The `opadapters` set (the default capture).
 export const CHAIN_NAMES: ChainName[] = ["blast", "mantle", "katana"];
+
+/// One capture file per set, all chains of a set at one signed L1 block.
+export interface FixtureSet {
+    name: string;
+    chains: ChainName[];
+    dir: string;
+    /// Forge export: "items" (oracle and L2 items, light client built in Solidity) or "real" (the real
+    /// light-client proof, trust anchor and full calldata).
+    forgeKind: "items" | "real";
+    forgeFile: string;
+}
+
+export const FIXTURE_SETS: Record<string, FixtureSet> = {
+    opadapters: {name: "opadapters", chains: CHAIN_NAMES, dir: OPADAPTERS_FIXTURE_DIR, forgeKind: "items",
+        forgeFile: OPADAPTERS_FORGE_FIXTURE},
+    fraxtal: {name: "fraxtal", chains: ["fraxtal"], dir: path.resolve(__dirname, "../fixtures/fraxtal-live"), forgeKind: "real",
+        forgeFile: path.resolve(__dirname, "../../verifiers/evm/opstack/oracle/fixtures/fraxtal-live.json")}
+};
+const captureFile = (set: FixtureSet) => path.join(set.dir, "capture.json");
+const pendingDirOf = (set: FixtureSet) => path.join(set.dir, "pending");
 
 export function channelIdFor(chain: ChainName): Hex {
     return keccak256(toHex(`clpr/opadapters-live/${chain}`));
@@ -224,11 +267,15 @@ async function captureL2Output(chain: OracleChain, blockNumber: bigint, withProo
     return {blockNumber: blockNumber.toString(), header: {hash: h.hash, stateRoot: h.stateRoot, withdrawalsRoot: h.withdrawalsRoot}, proof};
 }
 
-function loadPending(): PendingStage[] {
-    if (!existsSync(PENDING_DIR)) return [];
-    return readdirSync(PENDING_DIR).filter((f) => f.endsWith(".json"))
-        .map((f) => JSON.parse(readFileSync(path.join(PENDING_DIR, f), "utf8")) as PendingStage);
+function loadPending(set: FixtureSet): PendingStage[] {
+    const dir = pendingDirOf(set);
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir).filter((f) => f.endsWith(".json"))
+        .map((f) => JSON.parse(readFileSync(path.join(dir, f), "utf8")) as PendingStage);
 }
+
+/// The chains a capture holds, in capture order.
+const chainsOf = (c: {chains: Partial<Record<ChainName, unknown>>}) => Object.keys(c.chains) as ChainName[];
 
 type OutputTuple = {outputRoot: Hex; timestamp: bigint; l2BlockNumber: bigint};
 const GET_OUTPUT = "function getL2Output(uint256) view returns ((bytes32 outputRoot, uint128 timestamp, uint128 l2BlockNumber))";
@@ -279,24 +326,26 @@ async function captureChainL1(chain: OracleChain, l1Rpc: string, B: Hex, l1Time:
     };
 }
 
-/// Capture all three chains at one attested mainnet L1 block.
-export async function captureOpOracleLive(opts: {beaconApis?: string[]; l1Rpc?: string; waitForNonSignersMs?: number} = {}):
-    Promise<OpOracleLiveCapture> {
+/// Capture every chain of a set at one signed mainnet L1 block.
+export async function captureOpOracleLive(opts: {beaconApis?: string[]; l1Rpc?: string; waitForNonSignersMs?: number;
+    set?: FixtureSet} = {}): Promise<OpOracleLiveCapture> {
     const l1Rpc = opts.l1Rpc ?? MAINNET_L1_RPC;
     const beaconApis = opts.beaconApis ?? MAINNET_BEACON_APIS;
-    const pending = loadPending();
+    const set = opts.set ?? FIXTURE_SETS.opadapters;
+    const names = set.chains;
+    const pending = loadPending(set);
 
     const {beacon, extra} = await captureBeaconLive({beaconApis, waitForNonSignersMs: opts.waitForNonSignersMs}, async (execution, B) => {
         const l1Time = BigInt(execution.timestamp);
         const chains = {} as Record<ChainName, Awaited<ReturnType<typeof captureChainL1>>>;
-        for (const name of CHAIN_NAMES) chains[name] = await captureChainL1(ORACLE_CHAINS[name], l1Rpc, B, l1Time, pending);
+        for (const name of names) chains[name] = await captureChainL1(ORACLE_CHAINS[name], l1Rpc, B, l1Time, pending);
         const block = await rpc<{number: string; hash: Hex; stateRoot: Hex; timestamp: string}>(l1Rpc, "eth_getBlockByNumber", [B, false]);
         return {chains, block: {number: block.number, hash: block.hash, stateRoot: block.stateRoot, timestamp: block.timestamp}};
     });
 
     const {json: genesis} = await getJson<{data: {genesis_time: string}}>([beacon.sources.beaconApi, ...beaconApis], "/eth/v1/beacon/genesis");
     const chains = {} as Record<ChainName, ChainCapture>;
-    for (const name of CHAIN_NAMES) {
+    for (const name of names) {
         const chain = ORACLE_CHAINS[name];
         const c = extra.chains[name];
         const l2Of = (o: {l2BlockNumber: string}) => captureL2Output(chain, BigInt(o.l2BlockNumber), true);
@@ -308,10 +357,10 @@ export async function captureOpOracleLive(opts: {beaconApis?: string[]; l1Rpc?: 
         };
     }
     return {
-        network: "blast, mantle, katana on " + beacon.network,
+        network: names.join(", ") + " on " + beacon.network,
         capturedAt: new Date().toISOString(),
         sources: {beaconApi: beacon.sources.beaconApi, l1Rpc,
-            l2Rpcs: Object.fromEntries(CHAIN_NAMES.map((n) => [n, ORACLE_CHAINS[n].l2Rpcs])) as Record<ChainName, string[]>},
+            l2Rpcs: Object.fromEntries(names.map((n) => [n, ORACLE_CHAINS[n].l2Rpcs])) as Record<ChainName, string[]>},
         beacon: {...beacon, sources: {beaconApi: beacon.sources.beaconApi, executionRpc: l1Rpc}},
         l1: {genesisTime: genesis.data.genesis_time, block: extra.block},
         chains
@@ -394,7 +443,7 @@ export function buildOpOracleLiveProof(c: OpOracleLiveCapture): OpOracleLiveProo
     }
 
     const chains = {} as Record<ChainName, OracleChainProof>;
-    for (const name of CHAIN_NAMES) {
+    for (const name of chainsOf(c)) {
         const chain = ORACLE_CHAINS[name];
         const cc = c.chains[name];
         const period = BigInt(cc.finalizationPeriodSeconds);
@@ -501,7 +550,7 @@ export function forgeFixture(p: OpOracleLiveProof): unknown {
         l2StorageProof: x.l2StorageProofRlp ?? "0x"
     });
     const chains: Record<string, unknown> = {};
-    for (const name of CHAIN_NAMES) {
+    for (const name of chainsOf(p)) {
         const c = p.chains[name];
         chains[name] = {
             oracle: c.profile.oracle,
@@ -532,16 +581,54 @@ export function forgeFixture(p: OpOracleLiveProof): unknown {
     };
 }
 
-export function writeForgeFixture(p: OpOracleLiveProof, file = OPADAPTERS_FORGE_FIXTURE): void {
+/// Forge export with the REAL light-client proof: per chain, the pinned-profile fields to compare, the
+/// trust anchor and the exact calldata arguments (`verifyBundle` / `verifyL2StateRoot` / `verifyOutput`).
+export function realForgeFixture(p: OpOracleLiveProof): unknown {
+    const caseOf = (x: OracleOutputCase) => ({
+        index: Number(x.index),
+        outputRoot: x.outputRoot,
+        l1Timestamp: Number(x.l1Timestamp),
+        l2BlockNumber: Number(x.l2BlockNumber),
+        l2StateRoot: x.l2StateRoot,
+        finalizedAtL1: x.finalizedAtL1,
+        oracleProof: x.oracleProof,
+        l2StateRootProof: x.l2StateRootProof ?? "0x",
+        bundle: x.bundle ?? "0x"
+    });
+    const chains: Record<string, unknown> = {};
+    for (const name of chainsOf(p)) {
+        const c = p.chains[name];
+        const pend = c.pendingFinalized.find((x) => x.bundle);
+        chains[name] = {
+            oracle: c.profile.oracle,
+            oracleImplCodeHash: c.profile.oracleImplCodeHash,
+            finalizationPeriodSeconds: Number(c.finalizationPeriodSeconds),
+            length: Number(c.length),
+            trustAnchor: c.trustAnchor ?? "0x",
+            channelContext: c.channelContext,
+            newest: caseOf(c.newest),
+            finalized: caseOf(pend ?? c.finalized),
+            unpostedOracleProof: encodeOracleProof(c.unposted)
+        };
+    }
+    return {
+        note: "Generated by test/e2e/relay/buildOpOracleLiveProof.ts --set <set> (real mainnet sync-committee signature)",
+        l1: {stateRoot: p.l1StateRoot, slot: Number(p.l1Slot), time: Number(p.l1Time), genesisTime: Number(p.l1GenesisTime)},
+        participants: p.lightClient.signed.participants,
+        chains
+    };
+}
+
+export function writeForgeFixture(p: OpOracleLiveProof, file = OPADAPTERS_FORGE_FIXTURE, kind: FixtureSet["forgeKind"] = "items"): void {
     mkdirSync(path.dirname(file), {recursive: true});
-    writeFileSync(file, JSON.stringify(forgeFixture(p), null, 1) + "\n");
+    writeFileSync(file, JSON.stringify(kind === "real" ? realForgeFixture(p) : forgeFixture(p), null, 1) + "\n");
 }
 
 function summarize(p: OpOracleLiveProof): string {
     const o = (x: OracleOutputCase) => `#${x.index} L2 ${x.l2BlockNumber} posted ${x.l1Timestamp} ` +
         `${x.finalizedAtL1 ? "final" : "not final"}, ${x.bundle ? "full bundle" : x.l2StateRootProof ? "to L2 state root" : "L1 output only"}`;
     const lines = [`L1 slot ${p.l1Slot} (time ${p.l1Time}), participation ${p.lightClient.signed.participants}/512`];
-    for (const name of CHAIN_NAMES) {
+    for (const name of chainsOf(p)) {
         const c = p.chains[name];
         lines.push(`${name}: oracle ${c.profile.oracle} impl codeHash ${c.profile.oracleImplCodeHash}, length ${c.length}, ` +
             `period ${c.finalizationPeriodSeconds}s`);
@@ -554,18 +641,22 @@ function summarize(p: OpOracleLiveProof): string {
 
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
+    const setIdx = args.indexOf("--set");
+    const set = FIXTURE_SETS[setIdx >= 0 ? args[setIdx + 1] : "opadapters"];
+    if (!set) throw new Error(`--set: one of ${Object.keys(FIXTURE_SETS).join(", ")}`);
+    const PENDING_DIR = pendingDirOf(set);
     let capture: OpOracleLiveCapture;
     if (args.includes("--refresh")) {
         const waitIdx = args.indexOf("--wait-nonsigners");
-        capture = await captureOpOracleLive({waitForNonSignersMs: waitIdx >= 0 ? Number(args[waitIdx + 1]) * 1000 : 0});
+        capture = await captureOpOracleLive({set, waitForNonSignersMs: waitIdx >= 0 ? Number(args[waitIdx + 1]) * 1000 : 0});
         const built = buildOpOracleLiveProof(capture); // validate before writing
         mkdirSync(PENDING_DIR, {recursive: true});
-        writeFileSync(OPADAPTERS_LIVE_FIXTURE, JSON.stringify(capture, null, 1) + "\n");
+        writeFileSync(captureFile(set), JSON.stringify(capture, null, 1) + "\n");
         // Stage each chain's newest output whose finalized counterpart lacks a full bundle: its L2 proofs
         // are only fetchable now, and a refresh after its finalization period turns it into a full
         // FINALIZED bundle. Keep stages that are still not final, and the latest final one.
         const keep = new Set<string>();
-        for (const name of CHAIN_NAMES) {
+        for (const name of set.chains) {
             const cc = capture.chains[name];
             const n = cc.outputs.newest;
             const b = built.chains[name];
@@ -583,12 +674,12 @@ async function main(): Promise<void> {
         for (const f of readdirSync(PENDING_DIR)) {
             if (f.endsWith(".json") && !keep.has(f.replace(/\.json$/, ""))) unlinkSync(path.join(PENDING_DIR, f));
         }
-        console.log(`captured → ${path.relative(process.cwd(), OPADAPTERS_LIVE_FIXTURE)}`);
+        console.log(`captured → ${path.relative(process.cwd(), captureFile(set))}`);
     } else {
-        capture = loadOpOracleLiveCapture();
+        capture = loadOpOracleLiveCapture(captureFile(set));
     }
     const built = buildOpOracleLiveProof(capture);
-    writeForgeFixture(built);
+    writeForgeFixture(built, set.forgeFile, set.forgeKind);
     console.log(summarize(built));
 }
 

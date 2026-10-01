@@ -21,6 +21,7 @@
     "opstack:synthetic-fixture": "tsx test/e2e/relay/buildOpStackSyntheticFixture.ts",
     "test:e2e:opadapters-live": "vitest run test/e2e/tests/verifiers/opadapters-live-mainnet.spec.ts",
     "opadapters-live:refresh": "tsx test/e2e/relay/buildOpOracleLiveProof.ts --refresh --wait-nonsigners 60",
+    "opadapters-live:refresh:fraxtal": "tsx test/e2e/relay/buildOpOracleLiveProof.ts --set fraxtal --refresh",
     "opadapters:synthetic-fixture": "tsx test/e2e/relay/buildOpOracleSyntheticFixture.ts",
     "test:e2e:sei-verifier": "CLPR_BACKEND=sei vitest run test/e2e/tests/verifiers/sei-verifier.spec.ts",
     "test:e2e:all": "npm run test:e2e:anvil && npm run test:e2e:besu",
